@@ -25,6 +25,22 @@ const PROVIDERS = {
     }),
     extractResponse: (data) => data.choices?.[0]?.message?.content?.trim()
   },
+  '9router': {
+    url: process.env.NINEROUTER_URL || 'http://localhost:20128/v1/chat/completions',
+    defaultModel: 'kr/claude-sonnet-4.5',
+    getHeaders: (apiKey) => ({
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    }),
+    formatRequest: (model, messages, temperature) => ({
+      model,
+      messages,
+      temperature,
+      stream: false,
+      max_tokens: parseInt(process.env.CODE_GEN_MAX_TOKENS) || 4096
+    }),
+    extractResponse: (data) => data.choices?.[0]?.message?.content?.trim()
+  },
   google: {
     url: (model, apiKey) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     defaultModel: 'gemini-2.0-flash-exp',
@@ -85,11 +101,19 @@ async function callLLM(messages, temperature = 0.1) {
   const provider = PROVIDERS[LLM_PROVIDER];
 
   if (!provider) {
-    throw new Error(`Invalid LLM_PROVIDER: ${LLM_PROVIDER}. Must be 'openrouter' or 'google'`);
+    throw new Error(`Invalid LLM_PROVIDER: ${LLM_PROVIDER}. Must be 'openrouter', 'google' or '9router'`);
   }
 
   // Validate API key
-  const apiKey = LLM_PROVIDER === 'openrouter' ? OPENROUTER_API_KEY : GOOGLE_API_KEY;
+  let apiKey;
+  if (LLM_PROVIDER === 'openrouter') {
+    apiKey = OPENROUTER_API_KEY;
+  } else if (LLM_PROVIDER === '9router') {
+    apiKey = process.env.NINEROUTER_API_KEY;
+  } else {
+    apiKey = GOOGLE_API_KEY;
+  }
+
   if (!apiKey) {
     throw new Error(`${LLM_PROVIDER.toUpperCase()}_API_KEY is not configured`);
   }
@@ -174,10 +198,19 @@ async function callLLM(messages, temperature = 0.1) {
  * Get current LLM provider info
  */
 function getProviderInfo() {
+  let configured = false;
+  if (LLM_PROVIDER === 'openrouter') {
+    configured = !!OPENROUTER_API_KEY;
+  } else if (LLM_PROVIDER === '9router') {
+    configured = !!process.env.NINEROUTER_API_KEY;
+  } else {
+    configured = !!GOOGLE_API_KEY;
+  }
+
   return {
     provider: LLM_PROVIDER,
     model: LLM_MODEL || PROVIDERS[LLM_PROVIDER]?.defaultModel,
-    configured: LLM_PROVIDER === 'openrouter' ? !!OPENROUTER_API_KEY : !!GOOGLE_API_KEY
+    configured
   };
 }
 

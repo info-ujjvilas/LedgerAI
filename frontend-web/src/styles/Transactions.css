@@ -51,10 +51,16 @@
   justify-content: center;
 }
 
-.action-btn:hover {
+.action-btn:hover:not(:disabled) {
   background: rgba(127, 175, 138, 0.05);
   border-color: var(--accent-color);
   transform: translateY(-2px);
+}
+
+.action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
 }
 
 .action-btn.upload {
@@ -783,17 +789,17 @@
   border-top: 1px solid var(--glass-border);
 }
 
-/* ── Review button ─────────────────────────────────────────────── */
+/* ── Review button — matches Add Transaction styling, system palette accent ── */
 .action-btn.review-btn {
-  background: rgba(139, 92, 246, 0.12);
-  border-color: rgba(139, 92, 246, 0.35);
-  color: #a78bfa;
+  background: var(--bg-secondary);
+  border-color: var(--glass-border);
+  color: var(--text-primary);
 }
 
 .action-btn.review-btn:hover {
-  background: rgba(139, 92, 246, 0.2);
-  border-color: rgba(139, 92, 246, 0.6);
-  color: #c4b5fd;
+  background: rgba(72, 62, 168, 0.06);
+  border-color: var(--primary-action);
+  color: var(--primary-action);
   transform: translateY(-2px);
 }
 
@@ -1119,32 +1125,80 @@
 
 /* ── Auto-pipeline processing UI ───────────────────────────────── */
 
-/* Full-width info banner rendered above the tab bar */
+/* Slim text-only banner with an indeterminate loader bar below */
 .pipeline-processing-banner {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 18px;
+  flex-direction: column;
+  gap: 6px;
   margin-bottom: 12px;
-  border-radius: 10px;
-  background: rgba(59, 130, 246, 0.08);
-  border: 1px solid rgba(59, 130, 246, 0.22);
-  color: #93c5fd;
-  font-size: 13px;
-  font-weight: 600;
   animation: fadeSlideIn 0.2s ease;
 }
 
-/* Small inline spinner used inside the banner */
+/* Top row: spinner icon + message text */
+.pipeline-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* Indeterminate shimmer progress bar synced to background processing */
+.pipeline-progress-track {
+  width: 100%;
+  height: 3px;
+  border-radius: 4px;
+  background: var(--glass-border);
+  overflow: hidden;
+  position: relative;
+}
+
+.pipeline-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--primary-action);
+  /* Phase 2: smooth forward-fill — no looping */
+  transition: width 0.4s ease;
+  will-change: width;
+}
+
+/* Phase 1: shimmer sweeps while waiting for pipeline_started_at */
+.pipeline-progress-fill.indeterminate {
+  width: 40% !important;
+  left: unset;
+  transition: none;
+  animation: pipelineShimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes pipelineShimmer {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(300%); }
+}
+
+/* Small inline spinner used inside the banner text row */
 .pipeline-spinner {
   display: inline-block;
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(59, 130, 246, 0.25);
-  border-top-color: #3b82f6;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--glass-border);
+  border-top-color: var(--primary-action);
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
+}
+
+/* Percentage label at the right of the banner text row */
+.pipeline-pct {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--primary-action);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Applied to table rows / cells whose document is still pipeline-running */

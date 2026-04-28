@@ -1,7 +1,7 @@
 const supabase = require('../config/supabaseClient');
 require('dotenv').config();
 
-const ML_SERVICE_URL = process.env.ML_SERVICE_URL || `http://127.0.0.1:${process.env.PYTHON_PORT || 5000}`;
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL || `http://127.0.0.1:${process.env.PYTHON_PORT || 8000}`;
 
 /**
  * Handles the AI similarity matching for cleaned merchant strings.
@@ -14,10 +14,21 @@ const ML_SERVICE_URL = process.env.ML_SERVICE_URL || `http://127.0.0.1:${process
  */
 async function findVectorMatch(cleanString, userId, transactionType) {
   try {
-    if (!cleanString || !userId) return null;
+    const cleanMerchant = sanitizeMerchantString(cleanString);
+    if (!cleanMerchant || !userId) return null;
 
-    const uppercaseString = cleanString.toUpperCase();
-    const requiredBalanceNature = transactionType === 'DEBIT' ? 'DEBIT' : 'CREDIT';
+    const uppercaseString = cleanMerchant.toUpperCase();
+
+    // 🛡️ MEANINGFULNESS GUARD
+    // If the cleaned string is a single token with no spaces (likely a person name
+    // like MRVARADVIDYADHAR) AND is not a known short keyword, skip G_VEC entirely.
+    // Person names produce embeddings that match random categories at low threshold.
+    const isMeaningfulString = (
+      uppercaseString.includes(' ') ||   // Multi-word = probably meaningful
+      uppercaseString.length <= 12       // Short word = likely a keyword (TEA, EGGS, IRCTC)
+    );
+    // If single long token with no spaces, it is almost certainly a person name
+    const looksLikePersonName = !isMeaningfulString;
 
     // 1. Embedding Generation (Python ML Microservice)
     const response = await fetch(`${ML_SERVICE_URL}/embed`, {
@@ -57,6 +68,64 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     }
 
     // ------------------------------------------
+    // ⚡ STAGE 3.1.2: TRIPLE-THREAT (Exact & Fuzzy)
+    // ------------------------------------------
+    // Before vectors, check literal name existence (IRCTC) or typos (BREKFAST)
+    const { data: globalCache } = await supabase
+      .from('global_vector_cache')
+      .select('clean_name, target_template_id')
+      .eq('is_verified', true);
+
+    if (globalCache) {
+      let bestMatch = null;
+      for (const entry of globalCache) {
+        const cacheWord = entry.clean_name.toUpperCase();
+        
+        // A. LITERAL MATCH
+        // Only trigger if keyword is long (>= 5 chars) or is a standalone word
+        const isLiteralMatch = cacheWord.length >= 5 
+          ? uppercaseString.includes(cacheWord)
+          // Look for exact word, allowing optional trailing 'S' for plurals (e.g. EGG/EGGS)
+          : new RegExp(`\\b${cacheWord}S?\\b`, 'i').test(uppercaseString);
+
+        if (isLiteralMatch) {
+          bestMatch = { tid: entry.target_template_id, score: 1.0, type: 'G_KEY' };
+          break;
+        }
+
+        // B. FUZZY MATCH (The BREKFAST Fix)
+        const txnWords = uppercaseString.split(/[- ]/);
+        for (const w of txnWords) {
+          if (w.length <= 2) continue; // Allow 3-letter words like EGG or TEA
+          
+          let score = stringOverlapScore(w, cacheWord);
+          // Boost score if one completely starts with the other (e.g., EGGS / EGG, DOMINOS / DOMINO)
+          if (w.startsWith(cacheWord) || cacheWord.startsWith(w)) score += 0.15;
+
+          if (score > 0.85) {
+            bestMatch = { tid: entry.target_template_id, score: 0.90, type: 'G_VEC' };
+            break;
+          }
+        }
+        if (bestMatch) break;
+      }
+
+        if (bestMatch) {
+          // AUTO-DISCOVERY: Resolve template to account (Create if missing)
+          const offset_account_id = await resolveAccountFromTemplate(bestMatch.tid, userId);
+          
+          if (offset_account_id) {
+            console.info(`🎯 Triple-Threat Winner: ${bestMatch.type} on "${bestMatch.tid}"`);
+            return {
+              offset_account_id,
+              confidence_score: bestMatch.score,
+              categorised_by: bestMatch.type
+            };
+          }
+        }
+    }
+
+    // ------------------------------------------
     // 🔑 STAGE 3.1.5: GLOBAL KEYWORD RULES
     // ------------------------------------------
     // High-confidence deterministic matching for obvious keywords (e.g. COFFEE, PETROL, PIZZA).
@@ -73,40 +142,40 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     } else if (keywordRules && keywordRules.length > 0) {
       for (const rule of keywordRules) {
         const keyword = rule.keyword.toUpperCase();
-        const isMatch = rule.match_type === 'EXACT'
-          ? uppercaseString === keyword
-          : uppercaseString.includes(keyword);
+        
+        // Smarter matching: 
+        // 1. If keyword is short (< 5 chars), ensure it's a standalone word to avoid "PHONE" in "FROMPHONE"
+        // 2. If EXACT match, verify equality
+        let isMatch = false;
+        if (rule.match_type === 'EXACT') {
+          isMatch = (uppercaseString === keyword);
+        } else {
+          if (keyword.length < 5) {
+            // Support trailing 's' for short words (e.g. EGG vs EGGS)
+            const regex = new RegExp(`\\b${keyword}S?\\b`, 'i');
+            isMatch = regex.test(uppercaseString);
+          } else {
+            isMatch = uppercaseString.includes(keyword);
+          }
+        }
 
         if (!isMatch) continue;
 
         console.debug(`🔑 Keyword rule matched: "${keyword}" (priority:${rule.priority}, template:${rule.target_template_id}) on "${uppercaseString.slice(0, 60)}"`);
 
-        // Map the global template to the user's specific account, filtered by transaction type
-        const { data: accData, error: accError } = await supabase
-          .from('accounts')
-          .select('account_id')
-          .eq('user_id', userId)
-          .eq('template_id', rule.target_template_id)
-          .eq('is_active', true)
-          .eq('balance_nature', requiredBalanceNature)
-          .limit(1);
+        const offset_account_id = await resolveAccountFromTemplate(rule.target_template_id, userId);
 
-        if (accError) {
-          console.error('❌ findVectorMatch (Keyword) template mapping error:', accError);
-          continue; // Try next rule on error
-        }
-
-        if (accData && accData.length > 0) {
-          console.info(`✅ G_KEY winner: "${keyword}" → template:${rule.target_template_id} → account:${accData[0].account_id}`);
+        if (offset_account_id) {
+          console.info(`✅ G_KEY winner: "${keyword}" → template:${rule.target_template_id} → account:${offset_account_id}`);
           return {
-            offset_account_id: accData[0].account_id,
+            offset_account_id,
             confidence_score: 0.95,
             categorised_by: 'G_KEY'
           };
         }
 
-        // balance_nature mismatch — continue to next rule
-        console.debug(`⚠️ Keyword rule "${keyword}" (template:${rule.target_template_id}) skipped — balance_nature mismatch. Required: ${requiredBalanceNature}`);
+        // Template match found but no active user account mapped to this template
+        console.debug(`⚠️ Keyword rule "${keyword}" (template:${rule.target_template_id}) found, but no active account mapped for this user.`);
       }
     }
 
@@ -114,9 +183,15 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     // 🌐 STAGE 3.2: GLOBAL VECTOR CACHE Fallback
     // ------------------------------------------
     // Last resort: fuzzy semantic similarity against the global curated vector library.
+    // SKIP entirely if the string looks like a person name — vectors will match garbage at low threshold.
+    if (looksLikePersonName) {
+      console.debug(`🚫 G_VEC skipped: "${uppercaseString}" looks like a person name.`);
+      return null;
+    }
+
     const { data: gData, error: gError } = await supabase.rpc('match_vectors', {
       query_embedding: embedding,
-      match_threshold: 0.35,
+      match_threshold: 0.78,
       match_count: 1
     });
 
@@ -128,29 +203,18 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     if (gData && gData.length > 0) {
       const targetTemplateId = gData[0].target_template_id;
 
-      const { data: accData, error: accError } = await supabase
-        .from('accounts')
-        .select('account_id, balance_nature')
-        .eq('user_id', userId)
-        .eq('template_id', targetTemplateId)
-        .eq('is_active', true)
-        .eq('balance_nature', requiredBalanceNature)
-        .limit(1);
+      const offset_account_id = await resolveAccountFromTemplate(targetTemplateId, userId);
 
-      if (accError) {
-        console.error('❌ findVectorMatch (Global) template mapping error:', accError);
-        return null;
-      }
-
-      if (accData && accData.length > 0) {
+      if (offset_account_id) {
         return {
-          offset_account_id: accData[0].account_id,
+          offset_account_id,
           confidence_score: 0.85,
           categorised_by: 'G_VEC'
         };
       }
 
-      console.debug(`⚠️ Global vector match found but balance_nature mismatch. Template: ${targetTemplateId}, Required: ${requiredBalanceNature}`);
+      // Template match found but no active user account mapped to this template
+      console.debug(`⚠️ Global vector match found (template:${targetTemplateId}), but no active account mapped for this user.`);
     }
 
     return null;
@@ -177,16 +241,15 @@ async function findVectorMatch(cleanString, userId, transactionType) {
  */
 async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cleanName = null) {
   try {
+    const cleanMerchant = cleanName ? sanitizeMerchantString(cleanName) : null;
     if (!embedding || !Array.isArray(embedding) || !userId) return null;
-
-    const requiredBalanceNature = balanceNature === 'DEBIT' ? 'DEBIT' : 'CREDIT';
 
     // ── Stage 3.1: PERSONAL VECTOR CACHE ──────────────────────────────────────
     // Threshold 0.35 — personal history is trusted at lower similarity
     const { data: pData, error: pError } = await supabase.rpc('match_personal_vectors', {
       p_user_id: userId,
       query_embedding: embedding,
-      match_threshold: 0.35,
+      match_threshold: 0.75,
       match_count: 1
     });
 
@@ -204,7 +267,14 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
     // High-confidence deterministic matching for known merchants (e.g. SWIGGY, ZOMATO, AIRTEL).
     // Runs only when cleanName is available; silently skipped otherwise.
     if (cleanName) {
-      const uppercaseCleanName = cleanName.toUpperCase();
+      // Use the sanitized version for matching, not the raw cleanName
+      const uppercaseCleanName = sanitizeMerchantString(cleanName).toUpperCase();
+      
+      // MEANINGFULNESS GUARD for bulk pipeline
+      const looksLikePersonNameBulk = (
+        !uppercaseCleanName.includes(' ') &&
+        uppercaseCleanName.length > 12
+      );
       const { data: keywordRules } = await supabase
         .from('global_keyword_rules')
         .select('keyword, match_type, target_template_id, priority')
@@ -214,49 +284,55 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
       if (keywordRules && keywordRules.length > 0) {
         for (const rule of keywordRules) {
           const keyword = rule.keyword.toUpperCase();
-          const isMatch = rule.match_type === 'EXACT'
-            ? uppercaseCleanName === keyword
-            : uppercaseCleanName.includes(keyword);
+          
+          let isMatch = false;
+          if (rule.match_type === 'EXACT') {
+            isMatch = (uppercaseCleanName === keyword);
+          } else {
+            if (keyword.length < 5) {
+              // Support trailing 's' for short words (e.g. EGG vs EGGS)
+              const regex = new RegExp(`\\b${keyword}S?\\b`, 'i');
+              isMatch = regex.test(uppercaseCleanName);
+            } else {
+              isMatch = uppercaseCleanName.includes(keyword);
+            }
+          }
 
           if (!isMatch) continue;
 
           console.debug(`🔑 Keyword rule matched: "${keyword}" (priority:${rule.priority}, template:${rule.target_template_id}) on "${uppercaseCleanName.slice(0, 60)}"`);
 
-          const { data: accData, error: accError } = await supabase
-            .from('accounts')
-            .select('account_id')
-            .eq('user_id', userId)
-            .eq('template_id', rule.target_template_id)
-            .eq('is_active', true)
-            .eq('balance_nature', requiredBalanceNature)
-            .limit(1);
+          const offset_account_id = await resolveAccountFromTemplate(rule.target_template_id, userId);
 
-          if (accError) {
-            console.error('❌ findVectorMatchWithEmbedding (Keyword) template mapping error:', accError);
-            continue; // Try next rule on error
-          }
-
-          if (accData && accData.length > 0) {
-            console.info(`✅ G_KEY winner: "${keyword}" → template:${rule.target_template_id} → account:${accData[0].account_id}`);
+          if (offset_account_id) {
+            console.info(`✅ G_KEY winner: "${keyword}" → template:${rule.target_template_id} → account:${offset_account_id}`);
             return {
-              offset_account_id: accData[0].account_id,
+              offset_account_id,
               confidence_score: 0.95,
               categorised_by: 'G_KEY'
             };
           }
 
-          // balance_nature mismatch — continue to next rule
-          console.debug(`⚠️ Keyword rule "${keyword}" (template:${rule.target_template_id}) skipped — balance_nature mismatch. Required: ${requiredBalanceNature}`);
+          // Template match found but no active user account mapped to this template
+          console.debug(`⚠️ Keyword rule "${keyword}" (template:${rule.target_template_id}) found, but no active account mapped for this user.`);
         }
       }
     }
 
     // ── Stage 3.2: GLOBAL VECTOR CACHE ───────────────────────────────────────
-    // Threshold 0.35 — mirrors original findVectorMatch() behaviour.
-    // G_KEY now handles known merchants, so 0.35 is safe as a final safety net.
+    // Threshold 0.78 — high confidence floor to avoid person name false positives.
+    // Skip entirely if cleanName looks like a person name.
+    if (cleanName) {
+      const sanitizedForGuard = sanitizeMerchantString(cleanName).toUpperCase();
+      if (!sanitizedForGuard.includes(' ') && sanitizedForGuard.length > 12) {
+        console.debug(`🚫 G_VEC skipped (bulk): "${sanitizedForGuard}" looks like a person name.`);
+        return null;
+      }
+    }
+
     const { data: gData, error: gError } = await supabase.rpc('match_vectors', {
       query_embedding: embedding,
-      match_threshold: 0.35,
+      match_threshold: 0.78,
       match_count: 1
     });
 
@@ -268,26 +344,18 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
     if (gData && gData.length > 0) {
       const targetTemplateId = gData[0].target_template_id;
 
-      const { data: accData, error: accError } = await supabase
-        .from('accounts')
-        .select('account_id, balance_nature')
-        .eq('user_id', userId)
-        .eq('template_id', targetTemplateId)
-        .eq('is_active', true)
-        .eq('balance_nature', requiredBalanceNature)
-        .limit(1);
+      const offset_account_id = await resolveAccountFromTemplate(targetTemplateId, userId);
 
-      if (accError) return null;
-
-      if (accData && accData.length > 0) {
+      if (offset_account_id) {
         return {
-          offset_account_id: accData[0].account_id,
+          offset_account_id,
           confidence_score: 0.85,
           categorised_by: 'G_VEC'
         };
       }
 
-      console.debug(`⚠️ findVectorMatchWithEmbedding: Global match found but balance_nature mismatch. Required: ${requiredBalanceNature}`);
+      // Template match found but no active user account mapped to this template
+      console.debug(`⚠️ Global vector match found (template:${targetTemplateId}), but no active account mapped for this user.`);
     }
 
     return null;
@@ -298,7 +366,192 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
   }
 }
 
+/**
+ * Helper to calculate character-level overlap for catching typos.
+ */
+function stringOverlapScore(s1, s2) {
+  const longer = s1.length > s2.length ? s1 : s2;
+  const shorter = s1.length > s2.length ? s2 : s1;
+  const longerLength = longer.length;
+  if (longerLength === 0) return 1.0;
+  return (longerLength - editDistance(longer, shorter)) / parseFloat(longerLength);
+}
+
+function editDistance(s1, s2) {
+  s1 = s1.toLowerCase(); s2 = s2.toLowerCase();
+  const costs = new Array();
+  for (let i = 0; i <= s1.length; i++) {
+    let lastValue = i;
+    for (let j = 0; j <= s2.length; j++) {
+      if (i == 0) costs[j] = j;
+      else {
+        if (j > 0) {
+          let newValue = costs[j - 1];
+          if (s1.charAt(i - 1) != s2.charAt(j - 1))
+            newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+          costs[j - 1] = lastValue;
+          lastValue = newValue;
+        }
+      }
+    }
+    if (i > 0) costs[s2.length] = lastValue;
+  }
+  return costs[s2.length];
+}
+
+/**
+ * resolveAccountFromTemplate
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Maps a Template ID to a specific User Account ID.
+ * If the user lacks an account for this template, it is AUTO-CREATED.
+ */
+async function resolveAccountFromTemplate(templateId, userId) {
+  if (!templateId) return null;
+  
+  // 1. Check existing account for this template
+  const { data: existing } = await supabase
+    .from('accounts')
+    .select('account_id, account_name')
+    .eq('user_id', userId)
+    .eq('template_id', templateId)
+    .eq('is_active', true)
+    .limit(1);
+
+  if (existing && existing.length > 0) {
+    const acc = existing[0];
+    // Auto-heal stale 'Category N' names from old auto-creation runs
+    if (acc.account_name && acc.account_name.startsWith('Category ')) {
+      const fallbackNames = { 36: 'Food & Dining', 39: 'Mobile & Utilities', 97: 'Personal Care', 213: 'Groceries', 227: 'Travel & Transport', 578: 'Stationery' };
+      const { data: tData } = await supabase.from('templates').select('template_name').eq('id', templateId).single();
+      const correctName = (tData && tData.template_name) ? tData.template_name : (fallbackNames[templateId] || acc.account_name);
+      if (correctName !== acc.account_name) {
+        await supabase.from('accounts').update({ account_name: correctName }).eq('account_id', acc.account_id);
+        console.info(`📝 Auto-healed account name: "${acc.account_name}" → "${correctName}"`);
+      }
+    }
+    return acc.account_id;
+  }
+
+  // 2. Auto-Healing: Fetch template name and build the account box
+  try {
+    const { data: tData } = await supabase.from('templates').select('template_name').eq('id', templateId).single();
+    
+    // Comprehensive fallback names covering all known template IDs.
+    // If a template is NOT listed here AND not in the templates table,
+    // we return null rather than polluting the chart of accounts with "Category N".
+    const fallbackNames = {
+      14:  'Healthcare & Medical',
+      30:  'Education & Books',
+      35:  'Housing & Rent',
+      36:  'Food & Dining',
+      37:  'Travel & Transport',
+      38:  'Shopping & Clothing',
+      39:  'Mobile & Utilities',
+      40:  'Mobile & Utilities',
+      41:  'Insurance',
+      43:  'Investment & Savings',
+      45:  'Entertainment & Leisure',
+      52:  'Gifts & Donations',
+      97:  'Personal Care',
+      116: 'Subscriptions & Memberships',
+      121: 'Bank Charges & Fees',
+      213: 'Groceries',
+      227: 'Travel & Transport',
+      303: 'Other Taxes & Levies',
+      310: 'Fuel',
+      325: 'Miscellaneous',
+      433: 'ATM & Cash Withdrawal',
+      541: 'Investment & Savings',
+      549: 'Loan & EMI',
+      550: 'Credit Card Payment',
+      578: 'Stationery & Office Supplies',
+    };
+
+    const accountName = (tData && tData.template_name)
+      ? tData.template_name
+      : fallbackNames[templateId];
+
+    // If we cannot determine a proper name, refuse to create the account.
+    // The transaction will fall through to LLM for intelligent categorisation.
+    if (!accountName) {
+      console.debug(`⚠️ resolveAccountFromTemplate: No name found for template ${templateId} — refusing to create "Category ${templateId}". Will fall to LLM.`);
+      return null;
+    }
+    const { data: newAcc, error: createError } = await supabase
+      .from('accounts')
+      .insert({
+        user_id: userId,
+        account_name: accountName,
+        template_id: templateId,
+        account_type: 'EXPENSE',
+        is_active: true,
+        balance_nature: 'DEBIT' 
+      })
+      .select('account_id')
+      .single();
+
+    if (createError) {
+      console.error(`❌ Failed to auto-create account box for template ${templateId}:`, createError.message);
+      return null;
+    }
+
+    console.info(`✨ Auto-Discovery: Created new category box "${accountName}" for user.`);
+    return newAcc.account_id;
+  } catch (err) {
+    console.error(`❌ resolveAccountFromTemplate error:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * sanitizeMerchantString
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Strips UPI junk, numbers, and technical IDs to reveal the CORE merchant name.
+ * Example: 'UPI-HOTELSAISHRADHA-GPAY-11256457128-TEA' -> 'HOTEL SAI SHRADHA TEA'
+ */
+function sanitizeMerchantString(str) {
+  if (!str) return '';
+  
+  let cleanStr = str.trim();
+
+  // 1. Aggressively extract user notes from UPI (HDFC Style)
+  // In many bank formats, the note is appended at the very end after a hyphen,
+  // and comes AFTER the VPA handle (which contains an '@').
+  const atIndex = cleanStr.lastIndexOf('@');
+  if (atIndex !== -1) {
+    const lastHyphenIndex = cleanStr.lastIndexOf('-');
+    // Ensure the hyphen comes after the handle to avoid catching hyphenated names
+    if (lastHyphenIndex > atIndex) {
+      const possibleNote = cleanStr.substring(lastHyphenIndex + 1).trim();
+      // If it contains letters (not just bank numbers), it's highly likely a user note
+      if (/[A-Za-z]/.test(possibleNote)) {
+        cleanStr = possibleNote;
+      }
+    }
+  }
+
+  // 1.5. Aggressively extract user notes/payee from UPI (ICICI Style)
+  // Format: UPI/TxnID/NoteOrName/Handle/Bank/HexHash
+  if (str.startsWith('UPI/')) {
+    const parts = str.split('/');
+    if (parts.length >= 4 && parts[2].trim().length > 0) {
+      cleanStr = parts[2].trim();
+    }
+  }
+
+  // 2. Perform standard cleanup filters on remains or generic strings
+  return cleanStr
+    .replace(/^UPI[-/]/i, '')           // Remove UPI prefix with hyphen or slash
+    .replace(/-GPAY-[0-9]+/i, '')       // Remove GPAY junk
+    .replace(/@[a-zA-Z0-9.]+/i, '')     // Remove VPA handles (@okaxis, @ybl, etc.)
+    .replace(/[0-9]{6,}/g, '')          // Strip big numbers (6+ digits)
+    .replace(/[-_/]/g, ' ')             // Replace hyphens/underscores/slashes with spaces
+    .replace(/\s+/g, ' ')               // Collapse whitespace
+    .trim();
+}
+
 module.exports = {
   findVectorMatch,
-  findVectorMatchWithEmbedding
+  findVectorMatchWithEmbedding,
+  sanitizeMerchantString
 };

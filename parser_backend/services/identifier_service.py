@@ -130,14 +130,12 @@ def _get_column_set(identifier_json: dict) -> set:
 
 def check_format_exists(
     new_id_json: dict,
-    col_similarity_threshold: float = 0.80,
+    col_similarity_threshold: float = 0.65,  # Lowered from 0.80: LLM varies column names across runs
 ) -> Optional[Dict]:
     """
-    Check if an equivalent format exists in the database using Multi-Signal matching.
+    Check if an equivalent format exists in the database.
 
-    Signals for a Match (OR logic):
-    1. Perfect Column Fingerprint Match
-    2. Overlap Hit: Same Institution + (80% Column Overlap OR Same IFSC OR Same Title Phrase)
+    Match criteria: Same Institution Name + Column Overlap >= threshold (Jaccard).
 
     Returns the matching row dict, or None.
     """
@@ -147,11 +145,7 @@ def check_format_exists(
     if not new_norm_inst or new_norm_inst == "UNKNOWN":
         return None
 
-    # Signals from the new document
-    new_cols      = _get_column_set(new_id_json)
-    new_ifsc      = new_id_json.get("identity_markers", {}).get("issuer_identity", {}).get("regulatory_identifiers", {}).get("ifsc", {}).get("pattern")
-    new_title     = str(new_id_json.get("identity_markers", {}).get("document_structure_identity", {}).get("document_title_phrase", {}).get("patterns", [""])[0]).lower().strip()
-    new_format_id = new_id_json.get("id") or ""
+    new_cols = _get_column_set(new_id_json)
 
     try:
         all_rows: List[Dict] = get_all_matchable_formats()
@@ -159,8 +153,11 @@ def check_format_exists(
         logger.warning("check_format_exists: DB fetch failed — %s", exc)
         return None
 
+    best_match = None
+    best_overlap = 0.0
+
     for row in all_rows:
-        # ── 1. Institution must match first ───────────────────────────────────
+        # ── 1. Institution must match first (hard gate) ───────────────────────
         stored_norm_inst = normalise_institution_name(row.get("institution_name") or "")
         if stored_norm_inst != new_norm_inst:
             continue
@@ -171,29 +168,33 @@ def check_format_exists(
             try: stored_json = json.loads(stored_json)
             except: continue
 
-        # ── 2. Structural Signals ─────────────────────────────────────────────
+        # ── 2. Column Overlap (Jaccard) ───────────────────────────────────────
         stored_cols = _get_column_set(stored_json)
-        
-        # Calculate Overlap (Jaccard-ish)
         if not new_cols or not stored_cols:
-            intersection_ratio = 0
+            col_overlap = 0.0
         else:
             intersection = new_cols.intersection(stored_cols)
             union        = new_cols.union(stored_cols)
-            intersection_ratio = len(intersection) / len(union)
+            col_overlap  = len(intersection) / len(union) if union else 0.0
 
         # ── 3. Decision ───────────────────────────────────────────────────────
-        is_hit = (intersection_ratio >= col_similarity_threshold)
+        if col_overlap >= col_similarity_threshold and col_overlap > best_overlap:
+            best_overlap = col_overlap
+            best_match   = row
 
-        if is_hit:
-            logger.info(
-                "check_format_exists: HIT — statement_id=%s (column_overlap=%.2f)",
-                row.get("statement_id"), intersection_ratio
-            )
-            return row
+    if best_match:
+        logger.info(
+            "check_format_exists: HIT — statement_id=%s (column_overlap=%.2f)",
+            best_match.get("statement_id"), best_overlap,
+        )
+        return best_match
 
-    logger.info("check_format_exists: NO match for institution='%s' with overlap threshold %.2f", new_norm_inst, col_similarity_threshold)
+    logger.info(
+        "check_format_exists: NO match for institution='%s' with overlap threshold %.2f",
+        new_norm_inst, col_similarity_threshold,
+    )
     return None
+
 
 
 # ════════════════════════════════════════════════════════════

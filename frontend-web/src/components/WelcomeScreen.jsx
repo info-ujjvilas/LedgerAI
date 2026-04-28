@@ -118,7 +118,8 @@ const WelcomeScreen = ({ toggleTheme, isDarkMode, onSetupComplete }) => {
         }
       });
 
-      // 5. Update parent_account_id for all accounts that have a parent
+      // 5. Update parent_account_id — fire ALL concurrently via Promise.all
+      //    instead of serially (50+ sequential Supabase calls → 5-10s wait).
       const updates = templates
         .filter(t => t.parent_template_id && templateMap[t.parent_template_id])
         .map(t => ({
@@ -126,15 +127,14 @@ const WelcomeScreen = ({ toggleTheme, isDarkMode, onSetupComplete }) => {
           parent_account_id: templateMap[t.parent_template_id]
         }));
 
-      // Update in batches to set parent relationships
-      for (const update of updates) {
-        const { error: updateError } = await supabase
-          .from('accounts')
-          .update({ parent_account_id: update.parent_account_id })
-          .eq('account_id', update.account_id);
-
-        if (updateError) throw updateError;
-      }
+      await Promise.all(
+        updates.map(update =>
+          supabase
+            .from('accounts')
+            .update({ parent_account_id: update.parent_account_id })
+            .eq('account_id', update.account_id)
+        )
+      );
 
       // 6. Insert into user_modules to mark setup completion
       const moduleInserts = idsToFetch.map(id => ({
@@ -149,6 +149,7 @@ const WelcomeScreen = ({ toggleTheme, isDarkMode, onSetupComplete }) => {
       if (userModuleError) throw userModuleError;
 
       if (onSetupComplete) onSetupComplete();
+
 
     } catch (err) {
       console.error('Setup failed:', err);

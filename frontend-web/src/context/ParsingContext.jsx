@@ -174,10 +174,10 @@ const NotificationPortal = ({ notification, onClose }) => {
     useEffect(() => {
         if (!notification) return;
         
-        // Auto-dismiss after 4 seconds
+        // Auto-dismiss after 2 seconds (matches user request)
         const timer = setTimeout(() => {
             onClose();
-        }, 4000);
+        }, 2000);
         
         return () => clearTimeout(timer);
     }, [notification, onClose]);
@@ -191,59 +191,64 @@ const NotificationPortal = ({ notification, onClose }) => {
         onClose();
     };
 
+    const accentColor = notification.type === 'success' ? '#10B981' : '#F87171';
+
     return (
         <div 
             onClick={handleAction}
             style={{
                 position: 'fixed',
-                top: '24px',
-                right: '24px',
+                bottom: '20px',
+                right: '20px',
                 zIndex: 9999,
-                width: '360px',
-                animation: 'slideIn 0.4s ease-out',
-                cursor: 'pointer'
+                cursor: 'pointer',
+                animation: 'slideInNotif 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards',
             }}
         >
             <div style={{
-                background: 'var(--bg-secondary, rgba(255, 255, 255, 0.95))',
-                backdropFilter: 'blur(12px)',
-                borderRadius: '16px',
-                border: `1px solid ${notification.type === 'success' ? '#27ae6033' : '#e74c3c33'}`,
-                boxShadow: '0 10px 40px rgba(0,0,0,0.1)',
-                padding: '1.25rem',
+                backgroundColor: 'var(--bg-secondary)',
+                border: '1px solid var(--glass-border)',
+                borderLeft: `4px solid ${accentColor}`,
+                borderRadius: '12px',
+                padding: '16px',
+                minWidth: '320px',
                 display: 'flex',
-                gap: '1rem',
-                alignItems: 'center'
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '12px',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.3)',
             }}>
-                <div style={{
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '50%',
-                    background: notification.type === 'success' ? '#def7ec' : '#fde8e8',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0
-                }}>
-                    <span style={{ color: notification.type === 'success' ? '#03543f' : '#9b1c1c', fontSize: '1.2rem', fontWeight: 800 }}>
-                        {notification.type === 'success' ? '✓' : '!'}
-                    </span>
-                </div>
                 <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--text-primary, #1e1b4b)', marginBottom: '2px' }}>
+                    <div style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)', marginBottom: '2px' }}>
                         {notification.title}
                     </div>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary, #6b7280)', lineHeight: 1.4 }}>
+                    <div style={{ fontSize: '13px', color: 'var(--text-primary)', lineHeight: 1.4, opacity: 0.75 }}>
                         {notification.message}
                     </div>
                 </div>
+                <button
+                    onClick={(e) => { e.stopPropagation(); onClose(); }}
+                    style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        fontSize: '18px',
+                        padding: '0 0 0 8px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        flexShrink: 0,
+                    }}
+                >
+                    ✕
+                </button>
             </div>
             <style>{`
-                @keyframes slideIn {
-                    from { transform: translateX(100%); opacity: 0; }
-                    to { transform: translateX(0); opacity: 1; }
+                @keyframes slideInNotif {
+                    from { opacity: 0; transform: translateX(400px); }
+                    to   { opacity: 1; transform: translateX(0); }
                 }
             `}</style>
         </div>
     );
-};
+};

@@ -78,15 +78,16 @@ Your task is to match each transaction to the MOST APPROPRIATE category from the
 IMPORTANT GUIDELINES:
 - Analyze transaction details carefully (merchant names, keywords like DINNER, BREAKFAST, NETFLIX, etc.)
 - ALWAYS try to assign a category - only use null if the transaction is completely unrecognizable
-- Use context clues: DINNER/BREAKFAST/FOOD → Food & Dining, NETFLIX/ENTERTAINMENT → Living Expenses or Personal Care
+- PRIORITY RULE: Notes or words found at the end of a transaction (e.g., "...-TEA", "...-BREAKFAST") represent the ACTUAL purpose and should OVERRIDE the generic merchant name for categorization.
+- Use context clues: DINNER/BREAKFAST/FOOD/TEA → Food & Dining, NETFLIX/ENTERTAINMENT → Living Expenses or Personal Care
 - Be confident - if you're 50% sure or more, assign the category
 - Extract a clean merchant_name from the raw details — strip bank codes, transaction IDs, dates, and account numbers, keep only the meaningful entity name
 - Common patterns:
   * Food keywords (DINNER, BREAKFAST, RESTAURANT, CAFE) → Food & Dining
-  * Transport (UBER, OLA, TAXI, METRO) → Travel & Transport
-  * Utilities (ELECTRICITY, WATER, GAS) → Utilities
-  * Entertainment (NETFLIX, SPOTIFY, MOVIES) → Living Expenses or Personal Care
-  * Rent/Housing keywords → Housing & Rent
+  * Transport & Lodging (UBER, OLA, TAXI, METRO, HOTEL, STAY, LODGE, INN) → Travel & Transport
+  * Utilities (ELECTRICITY, WATER, GAS, RECHARGE, MOBILE, BILLPAY) → Utilities
+  * Entertainment (NETFLIX, SPOTIFY, MOVIES, CINEMA) → Living Expenses or Personal Care
+  * Rent/Housing keywords (RENT, APARTMENT, SOCIETY MAINT) → Housing & Rent
 
 STRICT INSTRUCTION: Your response MUST be EXACTLY a raw JSON array. Do NOT wrap it inside markdown blocks (e.g., no \`\`\`json). Do NOT add conversational text.
 
@@ -119,6 +120,7 @@ ${JSON.stringify(availableCategories, null, 2)}
 ${JSON.stringify(batch.map(t => ({
   transaction_id: t.uncategorized_transaction_id || t.transaction_id,
   details: t.details,
+  clean_name_hint: t.clean_merchant_name || null, // Providing the "Onion Peel" as a hint
   amount: t.debit || t.credit || 0,
   type: t.debit ? 'DEBIT' : 'CREDIT'
 })), null, 2)}

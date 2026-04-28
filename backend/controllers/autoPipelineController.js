@@ -38,22 +38,15 @@ const rulesEngineService = require('../services/rulesEngineService');
 const personalCacheService = require('../services/personalCacheService');
 const vectorMatchService = require('../services/vectorMatchService');
 
-// ── Person-name guard (mirrors Python _is_person_name) ───────────────────────
-// Prevents UPI P2P transfer names (e.g. RUPALIMAHADEV) from reaching G_VEC.
-
-const KNOWN_BRANDS = new Set([
-  'AMAZON', 'SWIGGY', 'ZOMATO', 'NETFLIX', 'SPOTIFY', 'AIRTEL', 'JIOMART',
-  'BLINKIT', 'ZEPTO', 'MYNTRA', 'FLIPKART', 'PAYTM', 'PHONEPE', 'GPAY',
-  'IRCTC', 'HDFC', 'ICICI', 'AXIS', 'KOTAK', 'TATANEU', 'MEESHO', 'AJIO',
-  'NYKAA', 'BIGBASKET', 'RAPIDO', 'OLA', 'UBER', 'MAKEMYTRIP', 'BOOKMYSHOW',
-]);
-
-function isPersonName(cleanName) {
+// ── Person-name heuristic ───────────────────────────────────────────────────
+// Used only as a hint for the LLM queue, not as a skip-gate anymore.
+function isPotentialPerson(cleanName) {
   if (!cleanName) return false;
   const s = cleanName.trim().toUpperCase();
-  if (!/^[A-Z]{4,25}$/.test(s)) return false;
-  if ([...KNOWN_BRANDS].some(brand => s.includes(brand))) return false;
-  return true;
+  const words = s.split(/\s+/);
+  // If it's 1-4 clean words with no numbers, it MIGHT be a person.
+  // We check for alpha-only strings to distinguish from IDs.
+  return /^[A-Z\s]{4,40}$/.test(s) && words.length >= 1 && words.length <= 4;
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -70,15 +63,79 @@ function verifyInternalSecret(req) {
 
 async function getAccountIdFromTemplate(templateId, userId) {
   if (!templateId) return null;
-  const { data, error } = await supabase
+  
+  // 1. Check if user already has an active account for this template
+  const { data: existing, error: fetchError } = await supabase
     .from('accounts')
     .select('account_id')
     .eq('user_id', userId)
     .eq('template_id', templateId)
     .eq('is_active', true)
     .limit(1);
-  if (error || !data || data.length === 0) return null;
-  return data[0].account_id;
+
+  if (existing && existing.length > 0) return existing[0].account_id;
+
+  // 2. NEW USER HEALING: If not found, fetch the official template name and create the account box
+  logger.info(`[AUTO-PIPELINE] New User Healing: Creating missing account for template ${templateId}`);
+  
+  const { data: tData } = await supabase.from('templates').select('template_name').eq('id', templateId).single();
+  
+  // Comprehensive fallback names for all known template IDs.
+  // If unknown: return null and let LLM categorise instead of polluting accounts with 'Category N'.
+  const fallbackNames = {
+    14:  'Healthcare & Medical',
+    30:  'Education & Books',
+    35:  'Housing & Rent',
+    36:  'Food & Dining',
+    37:  'Travel & Transport',
+    38:  'Shopping & Clothing',
+    39:  'Mobile & Utilities',
+    40:  'Mobile & Utilities',
+    41:  'Insurance',
+    43:  'Investment & Savings',
+    45:  'Entertainment & Leisure',
+    52:  'Gifts & Donations',
+    97:  'Personal Care',
+    116: 'Subscriptions & Memberships',
+    121: 'Bank Charges & Fees',
+    213: 'Groceries',
+    227: 'Travel & Transport',
+    303: 'Other Taxes & Levies',
+    310: 'Fuel',
+    325: 'Miscellaneous',
+    433: 'ATM & Cash Withdrawal',
+    541: 'Investment & Savings',
+    549: 'Loan & EMI',
+    550: 'Credit Card Payment',
+    578: 'Stationery & Office Supplies',
+  };
+
+  const accountName = (tData && tData.template_name) ? tData.template_name : fallbackNames[templateId];
+
+  if (!accountName) {
+    logger.warn(`[AUTO-PIPELINE] No name found for template ${templateId} — refusing to create 'Category ${templateId}'. Transaction goes to LLM queue.`);
+    return null;
+  }
+
+  const { data: newAcc, error: createError } = await supabase
+    .from('accounts')
+    .insert({
+      user_id: userId,
+      account_name: accountName,
+      template_id: templateId,
+      account_type: 'EXPENSE',
+      is_active: true,
+      balance_nature: 'DEBIT' 
+    })
+    .select('account_id')
+    .single();
+
+  if (createError) {
+    logger.error(`[AUTO-PIPELINE] Failed to auto-create account for template ${templateId}`, { error: createError.message });
+    return null;
+  }
+
+  return newAcc.account_id;
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -132,11 +189,19 @@ async function runAutoPipeline(req, res) {
       .from('uncategorized_transactions')
       .select(
         'uncategorized_transaction_id, details, txn_date, debit, credit, ' +
-        'account_id, pre_pipeline_strategy, group_id, vector_cache_ref'
+        'account_id, pre_pipeline_strategy, group_id, vector_cache_ref, ' +
+        'embedding, clean_merchant_name'
       )
       .eq('document_id', document_id)
-      .eq('user_id', user_id)
-      .eq('grouping_status', 'done');
+      .eq('user_id', user_id);
+
+    if (req.body.transactions && Array.isArray(req.body.transactions)) {
+      // Manual override for healing
+      uncatQuery = uncatQuery.in('uncategorized_transaction_id', req.body.transactions);
+    } else {
+      // Default: grouping job finished or pipeline already busy
+      uncatQuery = uncatQuery.in('grouping_status', ['done', 'pipeline_running']);
+    }
 
     // Exclude rows already written to transactions
     if (existingIds.length > 0) {
@@ -162,49 +227,46 @@ async function runAutoPipeline(req, res) {
     // STEP 2 — Batch-fetch pre-computed data
     // ══════════════════════════════════════════════════════════════════════════
 
-    // Build preComputedMap: uncategorized_transaction_id → { pre_pipeline_strategy, group_id, vector_cache_ref }
+    // Build maps from transaction rows (Direct DNA)
+    const embeddingMap = new Map();
+    const cleanNameMap = new Map();
     const preComputedMap = new Map();
+
     for (const row of pending) {
+      // 1. Store strategy and group info
       preComputedMap.set(row.uncategorized_transaction_id, {
         pre_pipeline_strategy: row.pre_pipeline_strategy,
         group_id: row.group_id,
         vector_cache_ref: row.vector_cache_ref,
       });
-    }
 
-    // Fetch staging embeddings from personal_vector_cache
-    const cacheRefs = pending
-      .map(r => r.vector_cache_ref)
-      .filter(Boolean);
+      // 2. Extract DNA (embedding)
+      let emb = row.embedding;
+      if (typeof emb === 'string' && emb.startsWith('[')) {
+        try { emb = JSON.parse(emb); } catch { emb = null; }
+      }
 
-    const embeddingMap = new Map(); // cache_id → float[]
-    const cleanNameMap = new Map(); // cache_id → clean_name string
+      if (Array.isArray(emb)) {
+        embeddingMap.set(row.uncategorized_transaction_id, emb);
+      }
 
-    if (cacheRefs.length > 0) {
-      const { data: cacheRows, error: cacheErr } = await supabase
-        .from('personal_vector_cache')
-        .select('cache_id, embedding, clean_name')
-        .in('cache_id', cacheRefs);
-
-      if (cacheErr) {
-        logger.warn('[AUTO-PIPELINE] Could not fetch staging embeddings', { error: cacheErr.message });
-      } else {
-        for (const row of (cacheRows || [])) {
-          let emb = row.embedding;
-          if (typeof emb === 'string') {
-            try { emb = JSON.parse(emb); } catch { emb = null; }
-          }
-          if (Array.isArray(emb)) {
-            embeddingMap.set(row.cache_id, emb);
-          }
-          if (row.clean_name) {
-            cleanNameMap.set(row.cache_id, row.clean_name);
-          }
-        }
+      // 3. Store clean name
+      if (row.clean_merchant_name) {
+        cleanNameMap.set(row.uncategorized_transaction_id, row.clean_merchant_name);
       }
     }
 
-    logger.info('[AUTO-PIPELINE] Embedding cache loaded', { cacheRefs: cacheRefs.length, found: embeddingMap.size });
+    logger.info('[AUTO-PIPELINE] Intelligence loaded directly from transactions', { found: embeddingMap.size });
+
+    // ── Pre-fetch Global Keyword Rules (Avoids 100s of serial queries) ────────
+    logger.info('[AUTO-PIPELINE] Pre-fetching global keyword rules...');
+    const { data: globalKeywordRules } = await supabase
+      .from('global_keyword_rules')
+      .select('keyword, match_type, target_template_id, priority')
+      .eq('is_active', true)
+      .order('priority', { ascending: false });
+
+    logger.info(`[AUTO-PIPELINE] Loaded [${globalKeywordRules?.length || 0}] keyword rules`);
 
     // ══════════════════════════════════════════════════════════════════════════
     // STEP 3 — Group deduplication
@@ -235,7 +297,9 @@ async function runAutoPipeline(req, res) {
     const resolvedRows = [];          // { txn, result } pairs ready to insert
     const llmLeftovers = [];          // uncategorized_transaction_ids needing LLM
 
+    let processedCount = 0;
     for (const txn of pending) {
+      processedCount++;
       const txnId = txn.uncategorized_transaction_id;
       const pre = preComputedMap.get(txnId) || {};
       const gid = pre.group_id;
@@ -303,64 +367,62 @@ async function runAutoPipeline(req, res) {
           };
           if (gid) groupResultMap.set(gid, result);
           resolvedRows.push({ txn, result });
-        } else {
-          logger.info('[AUTO-PIPELINE] P_EXACT MISS — grouping job already handled UNCATEGORISED dump', { txnId });
-          // Grouping job already wrote UNCATEGORISED row — skip here.
+          continue;
         }
-        continue;
+        // P_EXACT miss — fall through to Stage 3 (vector/keyword) before LLM queue.
+        // The raw details string often contains a user note (e.g. -TEA, -BAKERY) that
+        // the new sanitizeMerchantString can extract even when the pre-computed cleanName cannot.
+        logger.debug('[AUTO-PIPELINE] P_EXACT MISS — attempting Stage 3 before LLM queue', { txnId });
       }
 
       // ─────────────────────────────────────────────────────────────────────
-      // Stage 3 — Vector similarity (VECTOR_SEARCH / NO_RULE)
+      // Stage 3 — Unified Intelligent Vector Match (Triple-Threat)
+      // Always try raw txn.details FIRST so sanitizeMerchantString can extract
+      // the user note (e.g. -TEA, -BAKERY) from the original string.
+      // Fall back to pre-computed clean_merchant_name if details yields nothing.
       // ─────────────────────────────────────────────────────────────────────
-      const vecCacheRef = pre.vector_cache_ref;
-      const embedding = vecCacheRef ? embeddingMap.get(vecCacheRef) : null;
+      const cleanName = cleanNameMap.get(txnId) || null;
+      // Prefer raw details — our sanitizer extracts notes much better from the full string
+      const stringToMatch = txn.details || cleanName;
+      if (stringToMatch) {
+        try {
+          const vectorMatch = await vectorMatchService.findVectorMatch(
+            stringToMatch,
+            user_id,
+            transactionType
+          );
 
-      const cleanName = vecCacheRef ? cleanNameMap.get(vecCacheRef) || null : null;
-
-      if (embedding) {
-        // Guard: if clean_name looks like a person's name (UPI P2P), skip G_VEC
-        // and send straight to LLM/manual review. This handles old rows that were
-        // persisted before the Python-side fix was deployed.
-        if (isPersonName(cleanName)) {
-          logger.info('[AUTO-PIPELINE] Person name detected — skipping vector stage', {
-            txnId,
-            cleanName,
-          });
-          llmLeftovers.push(txnId);
-          if (gid) groupResultMap.set(gid, null);
-          continue;
-        }
-
-        const vectorMatch = await vectorMatchService.findVectorMatchWithEmbedding(
-          embedding,
-          user_id,
-          balanceNature,
-          cleanName
-        );
-
-        if (vectorMatch) {
-          const result = {
-            offset_account_id: vectorMatch.offset_account_id,
-            categorised_by: vectorMatch.categorised_by,
-            confidence_score: vectorMatch.confidence_score,
-            attention_level: 'LOW',
-            extracted_id: null,
-            clean_merchant_name: null,
-          };
-          if (gid) groupResultMap.set(gid, result);
-          resolvedRows.push({ txn, result });
-          continue;
+          if (vectorMatch) {
+            const result = {
+              offset_account_id: vectorMatch.offset_account_id,
+              categorised_by: vectorMatch.categorised_by,
+              confidence_score: vectorMatch.confidence_score,
+              attention_level: (vectorMatch.confidence_score < 0.7) ? 'MEDIUM' : 'LOW',
+              extracted_id: null,
+              clean_merchant_name: (cleanName || txn.details)?.toUpperCase() || null,
+            };
+            if (gid) groupResultMap.set(gid, result);
+            resolvedRows.push({ txn, result });
+            continue;
+          }
+        } catch (err) {
+          logger.error('[AUTO-PIPELINE] Vector match failed', { txnId, error: err.message });
         }
       } else {
-        logger.debug('[AUTO-PIPELINE] No embedding available for vector stage', { txnId, vecCacheRef });
+        logger.debug('[AUTO-PIPELINE] No string available for vector stage', { txnId });
       }
+
+      // Stage 3 also missed — now add to LLM queue
+      logger.info('[AUTO-PIPELINE] P_EXACT MISS — adding to LLM queue via Strict Lock fallback', { txnId });
 
       // No match from any stage — add to LLM queue
       llmLeftovers.push(txnId);
       if (gid) {
-        // Store a sentinel so group members know the rep went to LLM
         groupResultMap.set(gid, null);
+      }
+
+      if (processedCount % 50 === 0) {
+        logger.info(`[AUTO-PIPELINE] Progress: ${processedCount}/${pending.length}...`);
       }
     }
 
@@ -420,11 +482,12 @@ async function runAutoPipeline(req, res) {
         let finalAttentionLevel = result?.attention_level || 'LOW';
         let isUncategorised = false;
 
-        if (!finalOffsetId) {
-          finalOffsetId = transactionType === 'DEBIT' ? uncategorisedExpenseId : uncategorisedIncomeId;
-          finalCategorisedBy = 'UNCATEGORISED';
-          finalAttentionLevel = 'HIGH';
-          isUncategorised = true;
+        // Strict Lock: If no category was found, or it matched the generic "Uncategorised" fallbacks,
+        // do NOT move it to the transactions table. Keep it in the queue for the AI.
+        if (!finalOffsetId || finalOffsetId === uncategorisedExpenseId || finalOffsetId === uncategorisedIncomeId) {
+          llmLeftovers.push(txn.uncategorized_transaction_id);
+          if (txn.group_id) groupResultMap.set(txn.group_id, null);
+          return null;
         }
 
         return {
@@ -445,9 +508,9 @@ async function runAutoPipeline(req, res) {
           review_status: 'PENDING',
           uncategorized_transaction_id: txn.uncategorized_transaction_id,
           extracted_id: result?.extracted_id || null,
-          is_uncategorised: isUncategorised,
+          is_uncategorised: false,
         };
-      });
+      }).filter(Boolean); // Remove nulls from skipped rows
 
       const { error: insertErr } = await supabase.from('transactions').insert(insertRows);
       if (insertErr) {

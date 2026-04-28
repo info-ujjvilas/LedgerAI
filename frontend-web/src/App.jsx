@@ -29,6 +29,23 @@ import ProtectedRoute from './components/ProtectedRoute';
 
 // Guard component to handle setup check redirects without breaking route matching
 const ModuleGuard = ({ hasModules, hasIdentifiers, checkSetupStatus, user, toggleTheme, isDarkMode }) => {
+  // null means the async setup check is still in flight — show a neutral
+  // spinner so we never briefly flash the main app to a new user.
+  if (hasModules === null || hasIdentifiers === null) {
+    return (
+      <div style={{
+        height: '100vh', display: 'grid', placeItems: 'center',
+        backgroundColor: 'var(--bg-primary, #0B1220)',
+        color: 'var(--text-primary, #E6E8EC)', fontFamily: "'Outfit', sans-serif"
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ width: '36px', height: '36px', border: '3px solid var(--border-color)', borderTopColor: 'var(--primary-action)', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 1rem' }}></div>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          <div style={{ fontWeight: 600, letterSpacing: '0.5px', fontSize: '0.9rem' }}>Setting up your account...</div>
+        </div>
+      </div>
+    );
+  }
   if (hasModules === false) {
     return <WelcomeScreen onSetupComplete={checkSetupStatus} toggleTheme={toggleTheme} isDarkMode={isDarkMode} />;
   }

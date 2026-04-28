@@ -211,6 +211,12 @@ const Transactions = () => {
   const [failedDocIds, setFailedDocIds] = useState(new Set());
   const [retrying, setRetrying] = useState(false);
 
+  // ── Pipeline progress bar — time-based, synced to real completion ──────────
+  const [pipelineStartedAt, setPipelineStartedAt] = useState(null); // earliest pipeline_started_at ms
+  const [pipelineProgress, setPipelineProgress] = useState(0);      // 0-100
+  const progressIntervalRef = useRef(null);
+  const PIPELINE_ESTIMATED_MS = 35_000; // 35 s = comfortable upper bound
+
   // ── Similar transactions popup state ────────────────────────────
   const [similarTxns, setSimilarTxns] = useState([]);
   const [similarSuggestedAccount, setSimilarSuggestedAccount] = useState(null);
@@ -367,6 +373,7 @@ const Transactions = () => {
         const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;
         const stillProcessing = new Set();
         const failed = new Set();
+        const startedAts = [];
 
         for (const doc of docStatuses || []) {
           if (doc.grouping_status === 'pipeline_done') continue;
@@ -374,16 +381,24 @@ const Transactions = () => {
             failed.add(doc.document_id);
             continue;
           }
-          // Stale pipeline_running check
-          if (
-            doc.grouping_status === 'pipeline_running' &&
+          // Stale pipeline check (running, done, or pending)
+          const isStale = (
+            (doc.grouping_status === 'pipeline_running' || doc.grouping_status === 'done' || doc.grouping_status === 'pending') &&
             doc.pipeline_started_at &&
             Date.now() - new Date(doc.pipeline_started_at).getTime() > PIPELINE_TIMEOUT_MS
-          ) {
+          );
+
+          if (isStale) {
             failed.add(doc.document_id);
             continue;
           }
           stillProcessing.add(doc.document_id);
+          if (doc.pipeline_started_at) startedAts.push(new Date(doc.pipeline_started_at).getTime());
+        }
+
+        // Capture the earliest started_at so the progress bar knows when processing began
+        if (startedAts.length > 0) {
+          setPipelineStartedAt(prev => prev ?? Math.min(...startedAts));
         }
 
         setProcessingDocIds(stillProcessing);
@@ -508,6 +523,10 @@ const Transactions = () => {
           continue;
         }
         stillProcessing.add(doc.document_id);
+        // Keep pipelineStartedAt seeded in case fetchTransactions missed it
+        if (doc.pipeline_started_at) {
+          setPipelineStartedAt(prev => prev ?? new Date(doc.pipeline_started_at).getTime());
+        }
       }
 
       setProcessingDocIds(stillProcessing);
@@ -522,6 +541,38 @@ const Transactions = () => {
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [processingDocIds]);
+
+  // ── Drive the progress bar: tick forward based on elapsed time, jump to 100% on completion ──
+  useEffect(() => {
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+
+    if (processingDocIds.size === 0) {
+      if (pipelineProgress > 0 && pipelineProgress < 100) {
+        // Pipeline just finished — snap to 100%, then reset after a brief pause
+        setPipelineProgress(100);
+        const done = setTimeout(() => {
+          setPipelineProgress(0);
+          setPipelineStartedAt(null);
+        }, 700);
+        return () => clearTimeout(done);
+      }
+      return;
+    }
+
+    if (!pipelineStartedAt) return; // haven't captured start time yet — wait next poll
+
+    // Tick every 250 ms — fill using a logarithmic curve that slows near 90%
+    progressIntervalRef.current = setInterval(() => {
+      const elapsed = Date.now() - pipelineStartedAt;
+      const fraction = elapsed / PIPELINE_ESTIMATED_MS;
+      // Logarithmic: fast early, asymptotically approaches 90%
+      const pct = 90 * (1 - Math.exp(-3 * fraction));
+      setPipelineProgress(Math.min(90, Math.max(3, pct))); // always show at least 3%
+    }, 250);
+
+    return () => { if (progressIntervalRef.current) clearInterval(progressIntervalRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processingDocIds.size, pipelineStartedAt]);
 
   // Close popups on outside click
   useEffect(() => {
@@ -651,7 +702,7 @@ const Transactions = () => {
   };
 
   const handleCategorize = async () => {
-    const uncategorizedItems = transactions.filter(
+    const uncategorizedItems = filteredTransactions.filter(
       txn => !(txn.transactions && txn.transactions.length > 0)
     );
     if (uncategorizedItems.length === 0) {
@@ -703,8 +754,9 @@ const Transactions = () => {
               showToast('✅ Bulk categorise success!', 'success');
               fetchTransactions(activeFilter, true);
             }
-            if (payload.error) {
-              showToast('Bulk categorisation failed', 'error');
+            if (payload.type === 'error' || payload.error) {
+              showToast(payload.message || 'Bulk categorisation failed', 'error');
+              break; // Error from backend means we should stop
             }
           } catch {}
         }
@@ -1828,7 +1880,9 @@ const Transactions = () => {
               className={`action-btn ${isCategorizing ? 'categorising' : ''}`}
               onClick={handleCategorize}
               disabled={isCategorizing || processingDocIds.size > 0}
-              title={processingDocIds.size > 0 ? 'Please wait, transactions are still being processed' : ''}
+              title={processingDocIds.size > 0 
+                ? "Wait for background processing to finish" 
+                : "Let AI categorize all remaining uncategorized items"}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
               {isCategorizing
@@ -1841,15 +1895,38 @@ const Transactions = () => {
       </div>
 
       {/* ── Pipeline processing banner — sits above the tab bar ——————————— */}
-      {processingDocIds.size > 0 && (
-        <div className="pipeline-processing-banner">
-          <span className="pipeline-spinner" />
-          <span>
-            Processing {processingDocIds.size} document{processingDocIds.size > 1 ? 's' : ''}…
-            transactions will update automatically.
-          </span>
-        </div>
-      )}
+      {/* Phase 1: processingDocIds detected but pipeline hasn't reported started_at yet
+              → show shimmer immediately so the screen never looks frozen.
+          Phase 2: pipelineStartedAt known → switch to deterministic fill bar.
+          Phase 3: pipelineProgress === 100 → completion flash, then reset. */}
+      {(processingDocIds.size > 0 || pipelineProgress > 0) && (() => {
+        const isIndeterminate = processingDocIds.size > 0 && !pipelineStartedAt; // Phase 1
+        const isDone = pipelineProgress >= 100;
+        const docCount = processingDocIds.size;
+        return (
+          <div className="pipeline-processing-banner">
+            <div className="pipeline-banner-text">
+              {!isDone && <span className="pipeline-spinner" />}
+              <span>
+                {isDone
+                  ? 'Processing complete — transactions updated.'
+                  : `Processing ${docCount} document${docCount > 1 ? 's' : ''}… transactions will update automatically.`}
+              </span>
+              {/* Only show % once we have real progress (Phase 2+) */}
+              {!isIndeterminate && pipelineProgress > 0 && (
+                <span className="pipeline-pct">{Math.round(pipelineProgress)}%</span>
+              )}
+            </div>
+            <div className="pipeline-progress-track">
+              <div
+                className={`pipeline-progress-fill${isIndeterminate ? ' indeterminate' : ''}`}
+                style={isIndeterminate ? undefined : { width: `${pipelineProgress}%` }}
+              />
+            </div>
+          </div>
+        );
+      })()}
+
 
       {/* ── Pipeline error banner ————————————————————————————————— */}
       {failedDocIds.size > 0 && (

@@ -20,15 +20,17 @@ const llmBatchFallback = require('../services/llmBatchFallback');
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function processUploadSSE(req, res) {
+  const emit = (message, stage) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ message, stage })}\n\n`);
+    }
+  };
+
   try {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
-
-    const emit = (message, stage) => {
-      res.write(`data: ${JSON.stringify({ message, stage })}\n\n`);
-    };
 
     logger.info('Categorization request received', {
       documentIds: req.body?.document_ids,
@@ -125,12 +127,9 @@ async function processUploadSSE(req, res) {
           let isUncategorised      = item.is_uncategorised || false;
 
           if (!finalOffsetAccountId) {
-            finalOffsetAccountId = transactionType === 'DEBIT'
-              ? uncategorisedExpenseId
-              : uncategorisedIncomeId;
-            finalCategorisedBy  = 'UNCATEGORISED';
-            finalAttentionLevel = 'HIGH';
-            isUncategorised     = true;
+            // Strict Lock: Do not flush to transactions table if no category was found.
+            // This prevents unresolved rows from jumping the queue prematurely.
+            return null;
           }
 
           return {
@@ -153,11 +152,14 @@ async function processUploadSSE(req, res) {
             extracted_id: item.extracted_id || null,
             is_uncategorised: item.is_contra ? false : isUncategorised
           };
-        });
+        }).filter(Boolean);
 
       if (rows.length === 0) return;
 
-      const { error } = await supabase.from('transactions').insert(rows);
+      const { error } = await supabase
+        .from('transactions')
+        .insert(rows);
+
       if (error) {
         logger.error('Flush insert failed', { error: error.message, count: rows.length });
       } else {
@@ -181,17 +183,18 @@ async function processUploadSSE(req, res) {
     if (document_ids.length > 0) {
       logger.info('Waiting for grouping + auto-pipeline to complete', { docIds: document_ids });
 
-      const POLL_INTERVAL_MS = 2000;
-      const TIMEOUT_MS = 30000;
+      const POLL_INTERVAL_MS = 3000;
+      const TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
       const startTime = Date.now();
       let pendingDocs = [];
 
       do {
+        // Wait for docs that are NOT in terminal statuses
         const { data: docRows } = await supabase
           .from('documents')
           .select('document_id, grouping_status')
           .in('document_id', document_ids)
-          .eq('grouping_status', 'pending');
+          .not('grouping_status', 'in', '("pipeline_done", "pipeline_failed")');
 
         pendingDocs = docRows || [];
 
@@ -202,7 +205,8 @@ async function processUploadSSE(req, res) {
             });
             break;
           }
-          emit('Preparing transactions, almost ready…', 'grouping');
+          const statuses = [...new Set(pendingDocs.map(d => d.grouping_status))];
+          emit(`Waiting for background processing (${statuses.join(', ')})…`, 'grouping');
           await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
         }
       } while (pendingDocs.length > 0);
@@ -256,11 +260,59 @@ async function processUploadSSE(req, res) {
     }
 
     const llmQueueRows = queueRows || [];
-    logger.info('LLM queue rows fetched', { count: llmQueueRows.length });
-
-    // If nothing in llm_queue — we're done
+    
+    // ── HEALER LOGIC: If queue is empty but rows are still "Pending Categorisation" ──
+    // This happens if the auto-pipeline crashed before writing to llm_queue.
     if (llmQueueRows.length === 0) {
-      logger.info('llm_queue empty — no LLM work needed');
+      logger.info('[BULK-CAT] llm_queue empty — checking for Limbo rows');
+      const { data: limboRows } = await supabase
+        .from('uncategorized_transactions')
+        .select('uncategorized_transaction_id')
+        .in('document_id', document_ids)
+        .eq('user_id', userId);
+
+      // Check which ones are already in 'transactions'
+      const uncatIds = (limboRows || []).map(r => r.uncategorized_transaction_id);
+      if (uncatIds.length > 0) {
+        const { data: resolvedExits } = await supabase
+          .from('transactions')
+          .select('uncategorized_transaction_id')
+          .in('uncategorized_transaction_id', uncatIds);
+        
+        const resolvedSet = new Set((resolvedExits || []).map(r => r.uncategorized_transaction_id));
+        const trulyPending = uncatIds.filter(id => !resolvedSet.has(id));
+
+        if (trulyPending.length > 0) {
+          logger.info('[BULK-CAT] Found truly pending rows — re-triggering auto-pipeline', { count: trulyPending.length });
+          emit(`Recovering ${trulyPending.length} transactions…`, 'recovery');
+          
+          const autoPipeline = require('./autoPipelineController');
+          await autoPipeline.runAutoPipeline({ 
+            headers: { authorization: `Bearer ${process.env.INTERNAL_SECRET || ''}` },
+            body: { document_id: document_ids[0], user_id: userId, transactions: trulyPending }
+          }, { 
+            json: () => {}, 
+            status: () => ({ json: () => {} }) 
+          });
+
+          // Re-fetch queue after healing
+          const { data: refetchedRows } = await supabase
+            .from('llm_queue')
+            .select('uncategorized_transaction_id, uncategorized_transactions!inner(uncategorized_transaction_id, details, txn_date, debit, credit, account_id, document_id, vector_cache_ref)')
+            .in('document_id', document_ids)
+            .eq('user_id', userId)
+            .eq('status', 'pending');
+          
+          if (refetchedRows && refetchedRows.length > 0) {
+            llmQueueRows.push(...refetchedRows);
+            logger.info('[BULK-CAT] Recovery successful', { newCount: llmQueueRows.length });
+          }
+        }
+      }
+    }
+
+    if (llmQueueRows.length === 0) {
+      logger.info('llm_queue empty — truly no LLM work needed');
       emit('Done', 'done');
       res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
       res.end();
