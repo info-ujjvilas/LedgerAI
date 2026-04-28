@@ -591,25 +591,27 @@ export default function ParsingPage() {
                                             <TableIcon size={14} /> Transactions
                                         </button>
 
-                                        <button
-                                            onClick={() => handleDeleteDocument(doc.document_id, doc.file_name)}
-                                            style={{
-                                                background: 'rgba(231, 76, 60, 0.05)',
-                                                border: '1px solid #fecaca',
-                                                padding: '6px 10px',
-                                                borderRadius: '8px',
-                                                color: '#e74c3c',
-                                                cursor: 'pointer',
-                                                transition: 'all 0.2s',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center'
-                                            }}
-                                            onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
-                                            onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
-                                        >
-                                            <Trash2 size={16} />
-                                        </button>
+                                        {doc.status !== 'APPROVE' && (
+                                            <button
+                                                onClick={() => handleDeleteDocument(doc.document_id, doc.file_name)}
+                                                style={{
+                                                    background: 'rgba(231, 76, 60, 0.05)',
+                                                    border: '1px solid #fecaca',
+                                                    padding: '6px 10px',
+                                                    borderRadius: '8px',
+                                                    color: '#e74c3c',
+                                                    cursor: 'pointer',
+                                                    transition: 'all 0.2s',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center'
+                                                }}
+                                                onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                                                onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                            >
+                                                <Trash2 size={16} />
+                                            </button>
+                                        )}
                                     </div>
                                 </td>
                             </tr>
