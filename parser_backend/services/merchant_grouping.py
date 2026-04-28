@@ -230,29 +230,62 @@ def run_merchant_grouping(document_id: int, user_id: str) -> None:
     if not embed_txns:
         _finish(sb, document_id, txns, user_id)
         return
+    # ── 4. Collect Embeddings ──────────────────────────────────────────────────
     all_clean = [t["clean_string"] for t in embed_txns]
     embeddings = []
     for i in range(0, len(all_clean), EMBED_BATCH_SIZE):
         embeddings.extend(_embed_batch(all_clean[i:i+EMBED_BATCH_SIZE]))
+
+    # Bulk update embeddings
+    bulk_emb_updates = []
     for txn, emb in zip(embed_txns, embeddings):
         if emb:
-            sb.table("uncategorized_transactions").update({
-                "embedding": emb, "clean_merchant_name": txn["clean_string"]
-            }).eq("uncategorized_transaction_id", txn["uncategorized_transaction_id"]).execute()
             txn["embedding"] = emb
+            bulk_emb_updates.append({
+                "uncategorized_transaction_id": txn["uncategorized_transaction_id"],
+                "embedding": emb,
+                "clean_merchant_name": txn["clean_string"]
+            })
+    
+    if bulk_emb_updates:
+        logger.info("Bulk updating %d embeddings...", len(bulk_emb_updates))
+        sb.table("uncategorized_transactions").upsert(bulk_emb_updates).execute()
+
+    # ── 5. Perform Grouping ────────────────────────────────────────────────────
     embedded = [t for t in embed_txns if t.get("embedding")]
     if embedded:
         embedded = _group_within_batch(embedded)
-        for t in embedded:
-            sb.table("uncategorized_transactions").update({"group_id": t["group_id"]}).eq("uncategorized_transaction_id", t["uncategorized_transaction_id"]).execute()
+        bulk_group_updates = [
+            {"uncategorized_transaction_id": t["uncategorized_transaction_id"], "group_id": t["group_id"]}
+            for t in embedded
+        ]
+        if bulk_group_updates:
+            logger.info("Bulk updating %d group IDs...", len(bulk_group_updates))
+            sb.table("uncategorized_transactions").upsert(bulk_group_updates).execute()
+    
     _finish(sb, document_id, txns, user_id)
 
 def _finish(sb, doc_id, txns, user_id):
+    import time
     ids = [t["uncategorized_transaction_id"] for t in txns]
-    if ids: sb.table("uncategorized_transactions").update({"grouping_status": "done"}).in_("uncategorized_transaction_id", ids).execute()
+    if ids:
+        sb.table("uncategorized_transactions").update({"grouping_status": "done"}).in_("uncategorized_transaction_id", ids).execute()
+    
     sb.table("documents").update({"grouping_status": "pipeline_running", "updated_at": "now()"}).eq("document_id", doc_id).execute()
+    
+    # Wait a moment for DB to settle and avoid Render rate-limiting the next call
+    time.sleep(2)
+    
     node_url = os.environ.get("NODE_BACKEND_URL", "http://127.0.0.1:3000")
     secret = os.environ.get("INTERNAL_SECRET", "")
     if secret:
-        try: httpx.post(f"{node_url}/internal/auto-pipeline", json={"document_id": doc_id, "user_id": user_id}, headers={"Authorization": f"Bearer {secret}"}, timeout=120.0)
-        except: pass
+        logger.info("Triggering Node.js auto-pipeline for doc %s...", doc_id)
+        try:
+            httpx.post(
+                f"{node_url}/internal/auto-pipeline", 
+                json={"document_id": doc_id, "user_id": user_id}, 
+                headers={"Authorization": f"Bearer {secret}"}, 
+                timeout=120.0
+            )
+        except Exception as e:
+            logger.error("Failed to trigger Node.js pipeline: %s", e)

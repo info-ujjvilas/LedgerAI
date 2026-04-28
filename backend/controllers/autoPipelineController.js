@@ -63,7 +63,7 @@ function verifyInternalSecret(req) {
 
 async function getAccountIdFromTemplate(templateId, userId) {
   if (!templateId) return null;
-  
+
   // 1. Check if user already has an active account for this template
   const { data: existing, error: fetchError } = await supabase
     .from('accounts')
@@ -77,25 +77,25 @@ async function getAccountIdFromTemplate(templateId, userId) {
 
   // 2. NEW USER HEALING: If not found, fetch the official template name and create the account box
   logger.info(`[AUTO-PIPELINE] New User Healing: Creating missing account for template ${templateId}`);
-  
+
   const { data: tData } = await supabase.from('templates').select('template_name').eq('id', templateId).single();
-  
+
   // Comprehensive fallback names for all known template IDs.
   // If unknown: return null and let LLM categorise instead of polluting accounts with 'Category N'.
   const fallbackNames = {
-    14:  'Healthcare & Medical',
-    30:  'Education & Books',
-    35:  'Housing & Rent',
-    36:  'Food & Dining',
-    37:  'Travel & Transport',
-    38:  'Shopping & Clothing',
-    39:  'Mobile & Utilities',
-    40:  'Mobile & Utilities',
-    41:  'Insurance',
-    43:  'Investment & Savings',
-    45:  'Entertainment & Leisure',
-    52:  'Gifts & Donations',
-    97:  'Personal Care',
+    14: 'Healthcare & Medical',
+    30: 'Education & Books',
+    35: 'Housing & Rent',
+    36: 'Food & Dining',
+    37: 'Travel & Transport',
+    38: 'Shopping & Clothing',
+    39: 'Mobile & Utilities',
+    40: 'Mobile & Utilities',
+    41: 'Insurance',
+    43: 'Investment & Savings',
+    45: 'Entertainment & Leisure',
+    52: 'Gifts & Donations',
+    97: 'Personal Care',
     116: 'Subscriptions & Memberships',
     121: 'Bank Charges & Fees',
     213: 'Groceries',
@@ -125,7 +125,7 @@ async function getAccountIdFromTemplate(templateId, userId) {
       template_id: templateId,
       account_type: 'EXPENSE',
       is_active: true,
-      balance_nature: 'DEBIT' 
+      balance_nature: 'DEBIT'
     })
     .select('account_id')
     .single();
@@ -571,6 +571,61 @@ async function runAutoPipeline(req, res) {
         .eq('document_id', document_id);
     }
   }
+}
+
+module.exports = { runAutoPipeline };
+
+// ══════════════════════════════════════════════════════════════════════════
+// STEP 6 — Store LLM leftovers in llm_queue
+// ══════════════════════════════════════════════════════════════════════════
+
+if (llmLeftovers.length > 0) {
+  const queueRows = llmLeftovers.map(uncatId => ({
+    uncategorized_transaction_id: uncatId,
+    user_id,
+    document_id,
+    status: 'pending',
+  }));
+
+  const { error: queueErr } = await supabase.from('llm_queue').insert(queueRows);
+  if (queueErr) {
+    logger.error('[AUTO-PIPELINE] llm_queue insert failed', { error: queueErr.message, count: queueRows.length });
+  } else {
+    logger.info('[AUTO-PIPELINE] llm_queue populated', { count: queueRows.length });
+  }
+}
+
+const response = {
+  resolved: resolvedRows.length,
+  llm_pending: llmLeftovers.length,
+  document_id,
+};
+
+logger.info('[AUTO-PIPELINE] COMPLETE', response);
+return res.json(response);
+
+  } catch (err) {
+  pipelineError = err;
+  logger.error('[AUTO-PIPELINE] Unhandled exception', { error: err.message, stack: err.stack });
+  return res.status(500).json({ error: 'Internal server error', detail: err.message });
+} finally {
+  if (pipelineError) {
+    // Error path — record failure so frontend can show retry option
+    await supabase
+      .from('documents')
+      .update({
+        grouping_status: 'pipeline_failed',
+        pipeline_error: pipelineError.message || 'Unknown error',
+      })
+      .eq('document_id', document_id);
+  } else {
+    // Success path
+    await supabase
+      .from('documents')
+      .update({ grouping_status: 'pipeline_done' })
+      .eq('document_id', document_id);
+  }
+}
 }
 
 module.exports = { runAutoPipeline };
