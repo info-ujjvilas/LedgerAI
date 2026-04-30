@@ -144,6 +144,7 @@ async function runAutoPipeline(req, res) {
     pipeline_error: null,
   }).eq('document_id', document_id);
 
+  // let pipelineError = null;
   let pipelineError = null;
   try {
     // 1. Fetch pending transactions

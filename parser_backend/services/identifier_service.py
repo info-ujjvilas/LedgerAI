@@ -217,6 +217,7 @@ def check_format_exists(
         "check_format_exists: NO match for institution='%s' (cols=%s) with threshold %.2f",
         new_norm_inst, list(new_cols), col_similarity_threshold,
     )
+    # return None
     return None
 
 

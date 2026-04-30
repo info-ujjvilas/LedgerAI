@@ -12,8 +12,8 @@ from sentence_transformers import SentenceTransformer
 import uvicorn
 from dotenv import load_dotenv
 
+# from app_logger import get_logger
 from app_logger import get_logger
-
 # --- CONFIGURATION ---
 load_dotenv()
 logger = get_logger("ml-service")

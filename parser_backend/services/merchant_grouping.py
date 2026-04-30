@@ -161,6 +161,7 @@ def _embed_batch(client: httpx.Client, clean_strings: list[str]) -> list[list[fl
                 fallback.append(r.json().get("embedding"))
             except:
                 fallback.append(None)
+        # return fallback
         return fallback
 
 def _classify_transactions(txns: list[dict], routing_rules: list[dict]) -> list[dict]:
