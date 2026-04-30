@@ -209,6 +209,7 @@ const Transactions = () => {
   // ── Pipeline processing state — documents being auto-categorised ————————
   const [processingDocIds, setProcessingDocIds] = useState(new Set());
   const [failedDocIds, setFailedDocIds] = useState(new Set());
+  const [docNames, setDocNames] = useState({});
   const [retrying, setRetrying] = useState(false);
 
   // ── Pipeline progress bar — time-based, synced to real completion ──────────
@@ -368,8 +369,16 @@ const Transactions = () => {
       if (docIds.length > 0) {
         const { data: docStatuses } = await supabase
           .from('documents')
-          .select('document_id, grouping_status, pipeline_started_at, created_at')
+          .select('document_id, file_name, grouping_status, pipeline_started_at, created_at')
           .in('document_id', docIds);
+
+        if (docStatuses) {
+          setDocNames(prev => {
+            const next = { ...prev };
+            docStatuses.forEach(d => { if (d.file_name) next[d.document_id] = d.file_name; });
+            return next;
+          });
+        }
 
         const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;     // 5 min: running but no finish
         const NULL_PIPELINE_TIMEOUT_MS = 3 * 60 * 1000; // 3 min: never started (backend asleep)
@@ -523,8 +532,16 @@ const Transactions = () => {
     const interval = setInterval(async () => {
       const { data: docStatuses } = await supabase
         .from('documents')
-        .select('document_id, grouping_status, pipeline_started_at, created_at')
+        .select('document_id, file_name, grouping_status, pipeline_started_at, created_at')
         .in('document_id', [...processingDocIds]);
+
+      if (docStatuses) {
+        setDocNames(prev => {
+          const next = { ...prev };
+          docStatuses.forEach(d => { if (d.file_name) next[d.document_id] = d.file_name; });
+          return next;
+        });
+      }
 
       const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;
       const NULL_PIPELINE_TIMEOUT_MS = 3 * 60 * 1000;
@@ -1949,6 +1966,12 @@ const Transactions = () => {
         const isIndeterminate = processingDocIds.size > 0 && !pipelineStartedAt; // Phase 1
         const isDone = pipelineProgress >= 100;
         const docCount = processingDocIds.size;
+        
+        const processingNames = Array.from(processingDocIds)
+          .map(id => docNames[id])
+          .filter(Boolean)
+          .join(', ');
+
         return (
           <div className="pipeline-processing-banner">
             <div className="pipeline-banner-text">
@@ -1956,7 +1979,7 @@ const Transactions = () => {
               <span>
                 {isDone
                   ? 'Processing complete — transactions updated.'
-                  : `Processing ${docCount} document${docCount > 1 ? 's' : ''}… transactions will update automatically.`}
+                  : `Processing ${processingNames || `${docCount} document${docCount > 1 ? 's' : ''}`}… transactions will update automatically.`}
               </span>
               {/* Only show % once we have real progress (Phase 2+) */}
               {!isIndeterminate && pipelineProgress > 0 && (
@@ -1978,13 +2001,19 @@ const Transactions = () => {
       {failedDocIds.size > 0 && (() => {
         const isNeverStarted = pipelineErrorMsg === 'never_started';
         const isStale       = pipelineErrorMsg === 'stale';
+        
+        const failedNames = Array.from(failedDocIds)
+          .map(id => docNames[id])
+          .filter(Boolean)
+          .join(', ');
+
         return (
           <div className="pipeline-error-banner">
             <div className="pipeline-error-content">
               <span className="pipeline-error-icon">⚠</span>
               <div className="pipeline-error-text">
                 <span className="pipeline-error-title">
-                  {failedDocIds.size} document{failedDocIds.size > 1 ? 's' : ''} failed to process.
+                  {failedNames ? `${failedNames} failed to process.` : `${failedDocIds.size} document${failedDocIds.size > 1 ? 's' : ''} failed to process.`}
                 </span>
                 <span className="pipeline-error-subtitle">
                   {isNeverStarted
