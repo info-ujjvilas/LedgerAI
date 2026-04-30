@@ -1252,20 +1252,49 @@ async function retryPipeline(req, res) {
       return res.status(404).json({ error: 'Document not found.' });
     }
 
-    // 2. Only allow retry when failed OR running-but-stale (> 5 min)
+    // 2. Allow retry for any "stuck" state:
+    //   - pipeline_failed          : explicit run failure
+    //   - pipeline_running (stale) : run hung for > 5 min
+    //   - pending                  : grouping job never ran (parser backend was asleep)
+    //   - done                     : grouping finished but auto-pipeline was never triggered
     const STALE_MS = 5 * 60 * 1000;
     const isStaleRunning =
       doc.grouping_status === 'pipeline_running' &&
       doc.pipeline_started_at &&
       Date.now() - new Date(doc.pipeline_started_at).getTime() > STALE_MS;
 
-    if (doc.grouping_status !== 'pipeline_failed' && !isStaleRunning) {
+    const isRetryable =
+      doc.grouping_status === 'pipeline_failed' ||
+      doc.grouping_status === 'pending' ||
+      doc.grouping_status === 'done' ||
+      isStaleRunning;
+
+    if (!isRetryable) {
       return res.status(409).json({
-        error: `Cannot retry: document grouping_status is '${doc.grouping_status}'. Only pipeline_failed or stale pipeline_running documents can be retried.`
+        error: `Cannot retry: document grouping_status is '${doc.grouping_status}'. Retry is only available for failed or stuck documents.`
       });
     }
 
-    // 3. Reset document to 'done' so auto-pipeline can pick it up again
+    // 3. If the document never went through grouping ('pending'), promote all its
+    //    uncategorized_transactions rows to grouping_status='done' so the
+    //    auto-pipeline treats them as ready. The transactions are already in the DB
+    //    (inserted at approval time) — the grouping job just never ran.
+    if (doc.grouping_status === 'pending') {
+      const { error: promoteErr } = await supabase
+        .from('uncategorized_transactions')
+        .update({ grouping_status: 'done' })
+        .eq('document_id', document_id)
+        .eq('user_id', userId)
+        .neq('grouping_status', 'categorized'); // leave already-processed rows alone
+
+      if (promoteErr) {
+        console.error('[RETRY-PIPELINE] Failed to promote uncategorized rows:', promoteErr.message);
+      } else {
+        console.log(`[RETRY-PIPELINE] Promoted pending uncategorized_transactions to "done" for doc ${document_id}`);
+      }
+    }
+
+    // 3b. Reset document to 'done' so auto-pipeline can pick it up again
     await supabase
       .from('documents')
       .update({
