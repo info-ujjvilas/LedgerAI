@@ -197,10 +197,10 @@ const Overview = () => {
         const day = d.getDay();
         const diff = d.getDate() - day + (day === 0 ? -6 : 1);
         const weekStart = new Date(d.setDate(diff));
-        timeKey = weekStart.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
+        timeKey = weekStart.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
         sortTime = weekStart.getTime();
       } else {
-        timeKey = date.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
+        timeKey = date.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
       }
 
       if (!monthlyData[timeKey]) {

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { processUpload } = require('../controllers/bulkController');
 const { bulkUploadStatements } = require('../controllers/uploadController');
-const { recategorizeTransaction, approveTransaction, bulkApproveTransactions, manualCategorizeTransaction, correctTransaction, updateSourceAccount, updateTransactionNote, manualAddTransaction, retryPipeline } = require('../controllers/transactionController');
+const { recategorizeTransaction, approveTransaction, bulkApproveTransactions, bulkAssignAndApproveTransactions, manualCategorizeTransaction, correctTransaction, updateSourceAccount, updateTransactionNote, manualAddTransaction, retryPipeline } = require('../controllers/transactionController');
 
 const authMiddleware = require('../middleware/authMiddleware');
 
@@ -27,6 +27,11 @@ router.patch('/:id/approve', authMiddleware, approveTransaction);
 // Approves and posts multiple transactions in bulk.
 // Body: { transaction_ids: [id1, id2, ...] }
 router.post('/approve-bulk', authMiddleware, bulkApproveTransactions);
+
+// 🛡️ Route: POST /assign-approve-bulk
+// Assigns a new account and bulk approves multiple transactions.
+// Body: { transaction_ids: [id1, id2, ...], offset_account_id: id }
+router.post('/assign-approve-bulk', authMiddleware, bulkAssignAndApproveTransactions);
 
 // 🛡️ Route: POST /manual-categorize
 // Creates a transaction row from an uncategorized transaction.

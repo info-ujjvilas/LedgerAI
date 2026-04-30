@@ -12,7 +12,8 @@ const ATTENTION_ORDER = ['HIGH', 'MEDIUM', 'LOW'];
 // Small inline editor that appears when the amount cell is clicked
 const AmountEditor = ({ txn, onSave, onCancel }) => {
   const isDebit = txn.debit != null;
-  const [editAmount, setEditAmount] = useState(isDebit ? txn.debit : txn.credit);
+  const initialAmt = isDebit ? txn.debit : txn.credit;
+  const [editAmount, setEditAmount] = useState(initialAmt != null ? Number(initialAmt).toFixed(2) : '');
   const [editType, setEditType] = useState(isDebit ? 'DEBIT' : 'CREDIT');
   const [saving, setSaving] = useState(false);
   const inputRef = useRef(null);
@@ -52,6 +53,9 @@ const AmountEditor = ({ txn, onSave, onCancel }) => {
         min="0"
         value={editAmount}
         onChange={(e) => setEditAmount(e.target.value)}
+        onBlur={(e) => {
+          if (e.target.value) setEditAmount(Number(e.target.value).toFixed(2));
+        }}
         onKeyDown={handleKey}
       />
       <div className="amount-editor-actions">
@@ -251,6 +255,8 @@ const Transactions = () => {
   const [isManualAddOpen, setIsManualAddOpen] = useState(false);
   const [manualAddForm, setManualAddForm] = useState(EMPTY_MANUAL_FORM);
   const [manualAddPicker, setManualAddPicker] = useState(null); // 'src' | 'dest'
+  const [isBulkAssignOpen, setIsBulkAssignOpen] = useState(false);
+  const [isBulkAssigning, setIsBulkAssigning] = useState(false);
   const [manualAddSaving, setManualAddSaving] = useState(false);
   const [manualAddError, setManualAddError] = useState('');
 
@@ -883,6 +889,38 @@ const Transactions = () => {
     })();
   };
 
+  const handleApproveSelected = async () => {
+    if (selectedIds.size === 0) return;
+    
+    // We only approve rows that are categorised (have a transaction_id)
+    const transactionIdsToApprove = filteredTransactions
+      .filter(t => selectedIds.has(t.uncategorized_transaction_id) && t.transactions?.length > 0 && !t.transactions[0].is_uncategorised)
+      .map(t => t.transactions[0].transaction_id);
+
+    if (transactionIdsToApprove.length === 0) {
+      showToast('No categorised transactions selected to approve.', 'info');
+      return;
+    }
+
+    setIsApprovingBulk(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      await fetch(`${API_BASE_URL}/api/transactions/approve-bulk`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token || ''}`
+        },
+        body: JSON.stringify({ transaction_ids: transactionIdsToApprove })
+      });
+      fetchTransactions(activeFilter, true);
+      setSelectedIds(new Set());
+    } catch (err) {
+      showToast('Bulk approval failed', 'error');
+    } finally {
+      setIsApprovingBulk(false);
+    }
+  };
 
   const handleBulkApprove = async () => {
     if (selectedIds.size === 0) return;
@@ -1295,8 +1333,14 @@ const Transactions = () => {
     const categorised = [];
     const uncategorised = [];
 
-    transactions.forEach(txn => {
+    filteredTransactions.forEach(txn => {
       const txnRow = txn.transactions?.[0];
+
+      // If there's an active selection, restrict queue to only selected transactions
+      if (selectedIds.size > 0) {
+        if (!selectedIds.has(txn.uncategorized_transaction_id)) return;
+      }
+
       if (txnRow && txnRow.review_status !== 'APPROVED') {
         categorised.push(txn);
       } else if (!txn.transactions || txn.transactions.length === 0) {
@@ -1356,10 +1400,21 @@ const Transactions = () => {
     return [...catResult, ...uncategorised];
   };
 
-  const openReview = () => {
+  const openReview = (startId = null) => {
     const queue = buildReviewQueue();
+    if (queue.length === 0) {
+      showToast('No transactions to review', 'info');
+      return;
+    }
     setReviewQueue(queue);
-    setReviewIndex(0);
+    
+    let initialIndex = 0;
+    if (startId) {
+      const idx = queue.findIndex(t => t.uncategorized_transaction_id === startId);
+      if (idx !== -1) initialIndex = idx;
+    }
+
+    setReviewIndex(initialIndex);
     setReviewEditState({});
     setReviewValidationMsg('');
     setReviewDone(false);
@@ -1395,6 +1450,38 @@ const Transactions = () => {
       setManualAddError('Network error. Please try again.');
     } finally {
       setManualAddSaving(false);
+    }
+  };
+
+  const handleBulkAssignAccountSelect = async (account) => {
+    if (selectedIds.size === 0) return;
+    setIsBulkAssigning(true);
+    setIsBulkAssignOpen(false);
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch(`${API_BASE_URL}/api/transactions/assign-approve-bulk`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token || ''}`
+        },
+        body: JSON.stringify({
+          uncategorized_transaction_ids: Array.from(selectedIds),
+          offset_account_id: account.account_id
+        })
+      });
+
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to bulk assign');
+      
+      showToast(`Successfully assigned and approved ${json.approved_count} transactions`, 'success');
+      setSelectedIds(new Set());
+      fetchTransactions(activeFilter, true);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsBulkAssigning(false);
     }
   };
 
@@ -1825,6 +1912,29 @@ const Transactions = () => {
     })).filter((group) => group.transactions.length > 0);
   };
 
+  const getEligibleIdsInView = () => {
+    return filteredTransactions.filter(txn => {
+      const isCategorised = txn.transactions && txn.transactions.length > 0;
+      const status = isCategorised ? txn.transactions[0].review_status : 'Pending Categorisation';
+      return status !== 'APPROVED';
+    }).map(t => t.uncategorized_transaction_id);
+  };
+
+  const handleSelectAllFiltered = (e) => {
+    const eligibleIds = getEligibleIdsInView();
+    if (e.target.checked) {
+      const newSelected = new Set([...selectedIds, ...eligibleIds]);
+      setSelectedIds(newSelected);
+    } else {
+      const currentViewIds = new Set(eligibleIds);
+      const newSelected = new Set([...selectedIds].filter(id => !currentViewIds.has(id)));
+      setSelectedIds(newSelected);
+    }
+  };
+
+  const eligibleIdsInView = getEligibleIdsInView();
+  const isAllSelected = eligibleIdsInView.length > 0 && eligibleIdsInView.every(id => selectedIds.has(id));
+
   const toggleSelectAll = (level) => {
     const txnsInLevel = filteredTransactions.filter(
       (txn) => txn.transactions[0].attention_level === level
@@ -1858,6 +1968,7 @@ const Transactions = () => {
     // Use != null so that debit=0 is correctly treated as DEBIT (not credit)
     const isDebit = txn.debit != null;
     const amount = isDebit ? txn.debit : txn.credit;
+    const formattedAmount = Number(amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     if (correctingId === txn.uncategorized_transaction_id) {
       return (
@@ -1875,7 +1986,7 @@ const Transactions = () => {
         title="Click to correct amount or type"
         onClick={() => setCorrectingId(txn.uncategorized_transaction_id)}
       >
-        {isDebit ? `- ₹${amount}` : `+ ₹${amount}`}
+        {isDebit ? `- ₹${formattedAmount}` : `+ ₹${formattedAmount}`}
         <span className="amount-edit-hint">✎</span>
       </div>
     );
@@ -1924,7 +2035,19 @@ const Transactions = () => {
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              Review
+              Review {selectedIds.size > 0 ? `(${selectedIds.size})` : ''}
+            </button>
+          )}
+
+          {selectedIds.size > 0 && (
+            <button
+              className="action-btn primary-btn"
+              onClick={() => setIsBulkAssignOpen(true)}
+              disabled={isBulkAssigning}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              {isBulkAssigning ? <span className="spinner-small" style={{ borderColor: 'white', borderTopColor: 'transparent' }} /> : <ICONS.Plus />}
+              Assign Account ({selectedIds.size})
             </button>
           )}
           {activeFilter === 'PENDING_APP' ? (
@@ -2281,8 +2404,15 @@ const Transactions = () => {
                 </div>
               ) : getGroupedTransactions() && getGroupedTransactions().length > 0 ? (
                 <>
-                  <div className="table-header grouped">
-                    <div></div>
+                  <div className="table-header uniform-layout">
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <input
+                        type="checkbox"
+                        className="row-checkbox"
+                        checked={isAllSelected}
+                        onChange={handleSelectAllFiltered}
+                      />
+                    </div>
                     <div
                       style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
                       onClick={() => setDateSortOrder(p => p === 'desc' ? 'asc' : 'desc')}
@@ -2290,10 +2420,10 @@ const Transactions = () => {
                       Date {dateSortOrder === 'desc' ? '↓' : '↑'}
                     </div>
                     <div>Details</div>
-                    <div>Amount</div>
-                    <div>Src Acc</div>
-                    <div>Dest Acc</div>
+                    <div style={{ textAlign: 'right', display: 'block', width: '100%' }}>Amount</div>
+                    <div>Account (Src → Dest)</div>
                     <div>Categorised By</div>
+                    <div>Status</div>
                   </div>
                   <div className="placeholder-rows">
                     {getGroupedTransactions().map((group) => (
@@ -2313,7 +2443,7 @@ const Transactions = () => {
                           </span>
                         </div>
                         {group.transactions.map((txn) => {
-                          const isChecked = selectedIds.has(txn.transactions[0].transaction_id);
+                          const isChecked = selectedIds.has(txn.uncategorized_transaction_id);
                           const accountName = txn.transactions[0].accounts
                             ? txn.transactions[0].accounts.account_name
                             : '-';
@@ -2323,45 +2453,54 @@ const Transactions = () => {
                           return (
                             <div
                               key={txn.uncategorized_transaction_id}
-                              className={`table-row grouped ${isApprovingBulk && selectedIds.has(txn.transactions[0].transaction_id) ? 'row-approving' : ''}`}
+                              className={`table-row uniform-layout ${txn.debit != null ? 'row-debit' : 'row-credit'} ${isApprovingBulk && selectedIds.has(txn.uncategorized_transaction_id) ? 'row-approving' : ''}`}
                             >
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
                                 <input
                                   type="checkbox"
                                   className="row-checkbox"
                                   checked={isChecked}
-                                  disabled={isUncategorised}
+                                  disabled={txn.transactions?.[0]?.review_status === 'APPROVED'}
                                   onChange={() => {
                                     const newSelected = new Set(selectedIds);
                                     if (isChecked) {
-                                      newSelected.delete(txn.transactions[0].transaction_id);
+                                      newSelected.delete(txn.uncategorized_transaction_id);
                                     } else {
-                                      newSelected.add(txn.transactions[0].transaction_id);
+                                      newSelected.add(txn.uncategorized_transaction_id);
                                     }
                                     setSelectedIds(newSelected);
                                   }}
                                 />
                               </div>
-                              <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
-                              <div className="details-cell">{txn.details}</div>
-                              {renderAmountCell(txn)}
-                              <div
-                                className="account-cell-clickable"
-                                onClick={() => setSrcAccTarget(txn)}
-                                style={{ cursor: 'pointer' }}
-                                title="Click to change base account"
-                              >
-                                {txn.source_account?.account_name || '-'}
+                              <div>{new Date(txn.txn_date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}</div>
+                              <div className="details-cell raw-details" title={txn.details}>{txn.details}</div>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                                {renderAmountCell(txn)}
                               </div>
-                              <div
-                                className={txn.transactions[0].accounts ? 'account-cell-clickable' : ''}
-                                onClick={() => { if (txn.transactions[0].accounts) setRecatTarget(txn); }}
-                                style={{ cursor: txn.transactions[0].accounts ? 'pointer' : 'default' }}
-                              >
-                                {accountName}
+                              <div className="account-directional-cell">
+                                <span className="account-src" onClick={() => setSrcAccTarget(txn)} title="Click to change base account">
+                                  {txn.source_account?.account_name || '-'}
+                                </span>
+                                <span className="account-arrow">→</span>
+                                <span 
+                                  className={`account-dest ${txn.transactions[0].accounts ? 'account-cell-clickable' : ''}`}
+                                  onClick={() => { if (txn.transactions[0].accounts) setRecatTarget(txn); }}
+                                  title="Click to assign account"
+                                >
+                                  {accountName}
+                                </span>
                               </div>
                               <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                                 {categorisedBy}
+                              </div>
+                              <div>
+                                <span className="status-badge warning" style={{ display: 'inline-flex' }}>Pending Approval</span>
+                              </div>
+                              
+                              <div className="slide-approve-wrapper">
+                                <button className="slide-approve-btn" onClick={() => handleApprove(txn.transactions[0].transaction_id, isUncategorised, txn.uncategorized_transaction_id)} title="Approve">
+                                  <ICONS.Check />
+                                </button>
                               </div>
                             </div>
                           );
@@ -2381,16 +2520,22 @@ const Transactions = () => {
             </>
           ) : (
             <>
-              <div
-                className="table-header"
+              <div 
+                className="table-header uniform-layout"
                 style={{
-                  gridTemplateColumns: activeFilter === 'PENDING_CAT'
-                    ? '110px 1fr 110px 130px 150px 160px'
-                    : activeFilter === 'APPROVED'
-                    ? '110px 1fr 110px 130px 150px 140px'
-                    : '110px 1fr 110px 130px 150px 140px 160px 40px'
+                  gridTemplateColumns: activeFilter === 'PENDING_CAT' || activeFilter === 'APPROVED' 
+                    ? '30px 90px 1fr 110px 220px 130px'
+                    : undefined
                 }}
               >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <input
+                    type="checkbox"
+                    className="row-checkbox"
+                    checked={isAllSelected}
+                    onChange={handleSelectAllFiltered}
+                  />
+                </div>
                 <div
                   style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
                   onClick={() => setDateSortOrder(p => p === 'desc' ? 'asc' : 'desc')}
@@ -2398,12 +2543,10 @@ const Transactions = () => {
                   Date {dateSortOrder === 'desc' ? '↓' : '↑'}
                 </div>
                 <div>Details</div>
-                <div>Amount</div>
-                <div>Src Acc</div>
-                <div>Dest Acc</div>
-                {activeFilter !== 'PENDING_CAT' && <div>Categorised By</div>}
-                {activeFilter !== 'APPROVED' && <div>Status</div>}
-                {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && <div>Actions</div>}
+                <div style={{ textAlign: 'right', display: 'block', width: '100%' }}>Amount</div>
+                <div>Account (Src → Dest)</div>
+                <div>Categorised By</div>
+                {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && <div>Status</div>}
               </div>
               <div id="transactions-table" className="placeholder-rows">
                 {loading ? (
@@ -2442,103 +2585,104 @@ const Transactions = () => {
                     return (
                       <div
                         key={txn.uncategorized_transaction_id}
-                        className={`table-row ${isApprovingBulk && selectedIds.has(transactionId) ? 'row-approving' : ''}`}
-                        style={{
-                          gridTemplateColumns: activeFilter === 'PENDING_CAT'
-                            ? '110px 1fr 110px 130px 150px 160px'
-                            : activeFilter === 'APPROVED'
-                            ? '110px 1fr 110px 130px 150px 140px'
-                            : '110px 1fr 110px 130px 150px 140px 160px 40px'
+                        className={`table-row uniform-layout ${txn.debit != null ? 'row-debit' : 'row-credit'} ${isApprovingBulk && selectedIds.has(transactionId) ? 'row-approving' : ''}`}
+                        onClick={(e) => {
+                          if (e.target.closest('button') || e.target.closest('.account-cell-clickable') || e.target.closest('.account-src') || e.target.closest('.account-dest') || e.target.closest('.amount-editor') || e.target.closest('input[type="checkbox"]')) {
+                            return;
+                          }
+                          openReview(txn.uncategorized_transaction_id);
+                        }}
+                        style={{ 
+                          cursor: 'pointer',
+                          gridTemplateColumns: activeFilter === 'PENDING_CAT' || activeFilter === 'APPROVED' 
+                            ? '30px 90px 1fr 110px 220px 130px'
+                            : undefined
                         }}
                       >
-                        <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
-                        <div className="details-cell">{txn.details}</div>
-                        {renderAmountCell(txn)}
-                        <div
-                          className="account-cell-clickable"
-                          onClick={() => setSrcAccTarget(txn)}
-                          style={{ cursor: 'pointer' }}
-                          title="Click to change base account"
-                        >
-                          {txn.source_account?.account_name || '-'}
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+                          <input
+                            type="checkbox"
+                            className="row-checkbox"
+                            checked={selectedIds.has(txn.uncategorized_transaction_id)}
+                            disabled={status === 'APPROVED'}
+                            onChange={() => {
+                              const newSelected = new Set(selectedIds);
+                              if (selectedIds.has(txn.uncategorized_transaction_id)) {
+                                newSelected.delete(txn.uncategorized_transaction_id);
+                              } else {
+                                newSelected.add(txn.uncategorized_transaction_id);
+                              }
+                              setSelectedIds(newSelected);
+                            }}
+                          />
                         </div>
-                        <div
-                          className={
-                            `${
-                              isCategorised && txn.transactions[0].accounts
-                                ? 'account-cell-clickable'
-                                : isCategorised === false
-                                ? 'account-cell-clickable uncategorised'
-                                : ''
-                            }${isRowProcessing(txn) ? ' is-processing' : ''}${isRowFailed(txn) ? ' is-pipeline-failed' : ''}`
-                          }
-                          onClick={() => {
-                            if (isRowProcessing(txn) || isRowFailed(txn)) return;
-                            if (isCategorised && txn.transactions[0].accounts) {
-                              setRecatTarget(txn);
-                            } else if (!isCategorised) {
-                              setManualTarget(txn);
+                        <div>{new Date(txn.txn_date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}</div>
+                        <div className="details-cell raw-details" title={txn.details}>{txn.details}</div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                          {renderAmountCell(txn)}
+                        </div>
+                        <div className="account-directional-cell">
+                          <span className="account-src" onClick={() => setSrcAccTarget(txn)} title="Click to change base account">
+                            {txn.source_account?.account_name || '-'}
+                          </span>
+                          <span className="account-arrow">→</span>
+                          <span
+                            className={
+                              `account-dest ${
+                                isCategorised && txn.transactions[0].accounts
+                                  ? 'account-cell-clickable'
+                                  : isCategorised === false
+                                  ? 'account-cell-clickable uncategorised'
+                                  : ''
+                              }${isRowProcessing(txn) ? ' is-processing' : ''}${isRowFailed(txn) ? ' is-pipeline-failed' : ''}`
                             }
-                          }}
-                          style={{
-                            cursor:
-                              isRowProcessing(txn) || isRowFailed(txn)
-                                ? 'default'
-                                : (isCategorised && txn.transactions[0].accounts) || !isCategorised
-                                ? 'pointer'
-                                : 'default'
-                          }}
-                          title={isRowProcessing(txn) ? 'Auto-categorising…' : isRowFailed(txn) ? 'Pipeline failed — click Retry' : undefined}
-                        >
-                          {isRowProcessing(txn)
-                            ? <span className="processing-label">🔒 Processing…</span>
-                            : isRowFailed(txn)
-                            ? <span className="processing-label">⚠ Failed</span>
-                            : isCategorised ? accountName : '+ Assign'
-                          }
+                            onClick={() => {
+                              if (isRowProcessing(txn) || isRowFailed(txn)) return;
+                              if (isCategorised && txn.transactions[0].accounts) {
+                                setRecatTarget(txn);
+                              } else if (!isCategorised) {
+                                setManualTarget(txn);
+                              }
+                            }}
+                            style={{
+                              cursor:
+                                isRowProcessing(txn) || isRowFailed(txn)
+                                  ? 'default'
+                                  : (isCategorised && txn.transactions[0].accounts) || !isCategorised
+                                  ? 'pointer'
+                                  : 'default'
+                            }}
+                            title={isRowProcessing(txn) ? 'Auto-categorising…' : isRowFailed(txn) ? 'Pipeline failed — click Retry' : 'Click to assign account'}
+                          >
+                            {isRowProcessing(txn)
+                              ? '🔒 Processing…'
+                              : isRowFailed(txn)
+                              ? '⚠ Failed'
+                              : isCategorised ? accountName : '+ Assign'
+                            }
+                          </span>
                         </div>
-                        {activeFilter !== 'PENDING_CAT' && (
-                          <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                            {categorisedBy}
-                          </div>
-                        )}
-                        {activeFilter !== 'APPROVED' && (
+                        <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                          {categorisedBy}
+                        </div>
+                        {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && (
                           <div>
                             <span className={`status-badge ${status.toLowerCase().replace(' ', '-')}`}>
                               {status === 'PENDING' ? 'Pending Approval' : status}
                             </span>
                           </div>
                         )}
-                        {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && (
-                          <div className="actions-cell">
-                            {isRowProcessing(txn) ? (
-                              <span className="processing-label" style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                🔒
-                              </span>
-                            ) : isRowFailed(txn) ? (
-                              <span
-                                className="processing-label"
-                                style={{ fontSize: '12px', color: '#F59E0B' }}
-                                title="Pipeline failed — click Retry above"
-                              >
-                                ⚠
-                              </span>
-                            ) : status === 'PENDING' && isCategorised ? (
-                              <button
-                                className="action-icon-btn approve"
-                                onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
-                                title="Approve"
-                                disabled={isApproving}
-                              >
-                                {isApproving ? (
-                                  <span className="spinner-small"></span>
-                                ) : (
-                                  <ICONS.Check />
-                                )}
-                              </button>
-                            ) : (
-                              <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>—</span>
-                            )}
+                        
+                        {status === 'PENDING' && isCategorised && !isRowProcessing(txn) && !isRowFailed(txn) && (
+                          <div className="slide-approve-wrapper">
+                            <button
+                              className="slide-approve-btn"
+                              onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
+                              disabled={isApproving}
+                              title="Approve"
+                            >
+                              {isApproving ? <span className="spinner-small" style={{ borderColor: 'white', borderTopColor: 'transparent' }}></span> : <ICONS.Check />} 
+                            </button>
                           </div>
                         )}
                       </div>
@@ -2580,15 +2724,14 @@ const Transactions = () => {
                 return (
                   <div key={rowKey} className="similar-txn-row">
                     <div className="similar-txn-date">
-                      {new Date(txn.transaction_date).toLocaleDateString('en-IN',
-                        { year: 'numeric', month: 'short', day: '2-digit' })}
+                      {new Date(txn.transaction_date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}
                     </div>
                     <div className="similar-txn-details" title={txn.details}>
                       {txn.details}
                     </div>
                     <div className="similar-txn-amount">
                       {txn.transaction_type === 'DEBIT' ? '−' : '+'}
-                      ₹{(txn.amount || 0).toLocaleString('en-IN')}
+                      ₹{Number(txn.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </div>
                     <div className="similar-txn-from">
                       <span className="similar-from-label" title={txn.current_account?.account_name}>
@@ -2715,7 +2858,10 @@ const Transactions = () => {
               const isDebit = edits.transaction_type
                 ? edits.transaction_type === 'DEBIT'
                 : current.debit != null;
-              const displayAmount = edits.amount ?? (current.debit != null ? current.debit : (current.credit ?? 0));
+              let displayAmount = edits.amount ?? (current.debit != null ? current.debit : (current.credit ?? 0));
+              if (typeof displayAmount === 'number') {
+                displayAmount = displayAmount.toFixed(2);
+              }
               const displaySrcAcc = edits._src_account_name ?? current.source_account?.account_name ?? '-';
               const displayDestAcc = edits._offset_account_name ?? (isCategorised ? txnRow?.accounts?.account_name : null);
               const displayNote = edits.user_note    ?? txnRow?.user_note ?? '';
@@ -2733,96 +2879,109 @@ const Transactions = () => {
               return (
                 <>
                   {/* Header */}
-                  <div className="review-header">
+                  <div className="review-header" style={{ alignItems: 'center' }}>
                     <div>
                       <h2 className="review-title">Manual Review</h2>
                       <span className="review-progress">{reviewIndex + 1} of {reviewQueue.length}</span>
                     </div>
-                    <button className="review-close-btn" onClick={closeReview} title="Close (Esc)">✕</button>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+                        <input
+                          type="date"
+                          className="review-input"
+                          value={displayDate}
+                          onChange={e => patchReviewEdit(uncatId, { txn_date: e.target.value })}
+                          style={{ padding: '6px 10px', fontSize: '13px', width: 'auto', margin: 0 }}
+                        />
+                        <span className={`status-badge ${statusClass}`} style={{ margin: 0 }}>{statusLabel}</span>
+                      </div>
+                      <button className="review-close-btn" onClick={closeReview} title="Close (Esc)">✕</button>
+                    </div>
                   </div>
 
                   {/* Body */}
                   <div className="review-body">
 
-                    {/* Date */}
-                    <div className="review-field">
-                      <label className="review-field-label">Date</label>
-                      <input
-                        type="date"
-                        className="review-input"
-                        value={displayDate}
-                        onChange={e => patchReviewEdit(uncatId, { txn_date: e.target.value })}
-                      />
-                    </div>
-
                     {/* Details */}
                     <div className="review-field">
                       <label className="review-field-label">Details</label>
-                      <input
-                        type="text"
+                      <textarea
                         className="review-input"
                         value={displayDetails}
                         onChange={e => patchReviewEdit(uncatId, { details: e.target.value })}
                         placeholder="Transaction description"
+                        rows={3}
+                        style={{ resize: 'vertical', minHeight: '60px', fontFamily: 'inherit' }}
                       />
                     </div>
 
-                    {/* Amount */}
-                    <div className="review-field">
-                      <label className="review-field-label">Amount</label>
-                      <div className="review-amount-row">
-                        <div className="review-type-toggle">
-                          <button
-                            className={`type-btn ${isDebit ? 'active debit' : ''}`}
-                            onClick={() => patchReviewEdit(uncatId, { transaction_type: 'DEBIT' })}
-                          >− Dr</button>
-                          <button
-                            className={`type-btn ${!isDebit ? 'active credit' : ''}`}
-                            onClick={() => patchReviewEdit(uncatId, { transaction_type: 'CREDIT' })}
-                          >+ Cr</button>
+                    {/* Amount & Accounts Row */}
+                    <div style={{ display: 'flex', gap: '16px', alignItems: 'stretch' }}>
+                      {/* Left Side: Amount */}
+                      <div style={{ flex: '0 0 140px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                        <div className="review-field" style={{ flex: 1 }}>
+                          <label className="review-field-label">Amount</label>
+                          <input
+                            type="number"
+                            className="review-input review-amount-input"
+                            step="0.01"
+                            min="0.01"
+                            value={displayAmount}
+                            onChange={e => patchReviewEdit(uncatId, { amount: e.target.value })}
+                            onBlur={(e) => {
+                              if (e.target.value) {
+                                patchReviewEdit(uncatId, { amount: Number(e.target.value).toFixed(2) });
+                              }
+                            }}
+                            style={{ flex: 1, fontSize: '18px', fontWeight: 'bold' }}
+                          />
                         </div>
-                        <input
-                          type="number"
-                          className="review-input"
-                          step="0.01"
-                          min="0.01"
-                          value={displayAmount}
-                          onChange={e => patchReviewEdit(uncatId, { amount: parseFloat(e.target.value) })}
-                        />
+                        <div className="review-field" style={{ flex: 1, justifyContent: 'flex-end' }}>
+                          <label className="review-field-label" style={{ visibility: 'hidden' }}>Type</label>
+                          <div className="review-type-toggle" style={{ flex: 1 }}>
+                            <button
+                              className={`type-btn ${isDebit ? 'active debit' : ''}`}
+                              onClick={() => patchReviewEdit(uncatId, { transaction_type: 'DEBIT' })}
+                            >− Dr</button>
+                            <button
+                              className={`type-btn ${!isDebit ? 'active credit' : ''}`}
+                              onClick={() => patchReviewEdit(uncatId, { transaction_type: 'CREDIT' })}
+                            >+ Cr</button>
+                          </div>
+                        </div>
                       </div>
-                    </div>
 
-                    {/* Source Account */}
-                    <div className="review-field">
-                      <label className="review-field-label">Source Account</label>
-                      <button
-                        className="review-account-btn"
-                        onClick={() => setReviewPickerField('src')}
-                      >
-                        {displaySrcAcc}
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                      </button>
-                    </div>
+                      {/* Right Side: Accounts */}
+                      <div style={{ flex: '1', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                        {/* Source Account */}
+                        <div className="review-field" style={{ flex: 1 }}>
+                          <label className="review-field-label">Source Account</label>
+                          <button
+                            className="review-account-btn"
+                            onClick={() => setReviewPickerField('src')}
+                            style={{ flex: 1 }}
+                          >
+                            {displaySrcAcc}
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                          </button>
+                        </div>
 
-                    {/* Dest Account */}
-                    <div className="review-field">
-                      <label className="review-field-label">Category / Dest Account</label>
-                      <button
-                        className={`review-account-btn ${!displayDestAcc ? 'review-assign' : ''}`}
-                        onClick={() => setReviewPickerField('dest')}
-                      >
-                        {displayDestAcc
-                          ? (<span>{displayDestAcc} {isSuggested && <span className="review-suggested-badge">suggested</span>}</span>)
-                          : (siblingPrefill ? (<span>{siblingPrefill.account_name} <span className="review-suggested-badge">suggested</span></span>) : '+ Assign')
-                        }
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                      </button>
-                    </div>
-
-                    {/* Status (read only) */}
-                    <div className="review-field">
-                      <label className="review-field-label">Status</label>
-                      <span className={`status-badge ${statusClass}`}>{statusLabel}</span>
+                        {/* Dest Account */}
+                        <div className="review-field" style={{ flex: 1 }}>
+                          <label className="review-field-label">Category / Dest Account</label>
+                          <button
+                            className={`review-account-btn ${!displayDestAcc ? 'review-assign' : ''}`}
+                            onClick={() => setReviewPickerField('dest')}
+                            style={{ flex: 1 }}
+                          >
+                            {displayDestAcc
+                              ? (<span>{displayDestAcc} {isSuggested && <span className="review-suggested-badge">suggested</span>}</span>)
+                              : (siblingPrefill ? (<span>{siblingPrefill.account_name} <span className="review-suggested-badge">suggested</span></span>) : '+ Assign')
+                            }
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                          </button>
+                        </div>
+                      </div>
                     </div>
 
                     {/* Note */}
@@ -2939,88 +3098,104 @@ const Transactions = () => {
           <div className="review-card" onClick={e => e.stopPropagation()}>
 
             {/* Header */}
-            <div className="review-header">
+            <div className="review-header" style={{ alignItems: 'center' }}>
               <div>
                 <h2 className="review-title">Add Transaction</h2>
                 <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Saved directly as approved</span>
               </div>
-              <button className="review-close-btn" onClick={() => setIsManualAddOpen(false)} title="Close">✕</button>
-            </div>
-
-            {/* Body */}
-            <div className="review-body">
-
-              {/* Date */}
-              <div className="review-field">
-                <label className="review-field-label">Date</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <input
                   type="date"
                   className="review-input"
                   value={manualAddForm.txn_date}
                   onChange={e => setManualAddForm(f => ({ ...f, txn_date: e.target.value }))}
+                  style={{ padding: '6px 10px', fontSize: '13px', width: 'auto', margin: 0 }}
                 />
+                <button className="review-close-btn" onClick={() => setIsManualAddOpen(false)} title="Close">✕</button>
               </div>
+            </div>
+
+            {/* Body */}
+            <div className="review-body">
 
               {/* Details */}
               <div className="review-field">
                 <label className="review-field-label">Details</label>
-                <input
-                  type="text"
+                <textarea
                   className="review-input"
                   value={manualAddForm.details}
                   onChange={e => setManualAddForm(f => ({ ...f, details: e.target.value }))}
                   placeholder="Transaction description"
+                  rows={3}
+                  style={{ resize: 'vertical', minHeight: '60px', fontFamily: 'inherit' }}
                 />
               </div>
 
-              {/* Amount */}
-              <div className="review-field">
-                <label className="review-field-label">Amount</label>
-                <div className="review-amount-row">
-                  <div className="review-type-toggle">
-                    <button
-                      className={`type-btn ${manualAddForm.transaction_type === 'DEBIT' ? 'active debit' : ''}`}
-                      onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'DEBIT' }))}
-                    >− Dr</button>
-                    <button
-                      className={`type-btn ${manualAddForm.transaction_type === 'CREDIT' ? 'active credit' : ''}`}
-                      onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'CREDIT' }))}
-                    >+ Cr</button>
+              {/* Amount & Accounts Row */}
+              <div style={{ display: 'flex', gap: '16px', alignItems: 'stretch' }}>
+                {/* Left Side: Amount */}
+                <div style={{ flex: '0 0 140px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <div className="review-field" style={{ flex: 1 }}>
+                    <label className="review-field-label">Amount</label>
+                    <input
+                      type="number"
+                      className="review-input review-amount-input"
+                      step="0.01"
+                      min="0.01"
+                      value={manualAddForm.amount}
+                      onChange={e => setManualAddForm(f => ({ ...f, amount: e.target.value }))}
+                      onBlur={(e) => {
+                        if (e.target.value) {
+                          setManualAddForm(f => ({ ...f, amount: Number(e.target.value).toFixed(2) }));
+                        }
+                      }}
+                      placeholder="0.00"
+                      style={{ flex: 1, fontSize: '18px', fontWeight: 'bold' }}
+                    />
                   </div>
-                  <input
-                    type="number"
-                    className="review-input"
-                    step="0.01"
-                    min="0.01"
-                    value={manualAddForm.amount}
-                    onChange={e => setManualAddForm(f => ({ ...f, amount: e.target.value }))}
-                    placeholder="0.00"
-                  />
+                  <div className="review-field" style={{ flex: 1, justifyContent: 'flex-end' }}>
+                    <label className="review-field-label" style={{ visibility: 'hidden' }}>Type</label>
+                    <div className="review-type-toggle" style={{ flex: 1 }}>
+                      <button
+                        className={`type-btn ${manualAddForm.transaction_type === 'DEBIT' ? 'active debit' : ''}`}
+                        onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'DEBIT' }))}
+                      >− Dr</button>
+                      <button
+                        className={`type-btn ${manualAddForm.transaction_type === 'CREDIT' ? 'active credit' : ''}`}
+                        onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'CREDIT' }))}
+                      >+ Cr</button>
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-              {/* Source Account */}
-              <div className="review-field">
-                <label className="review-field-label">Source Account</label>
-                <button
-                  className={`review-account-btn ${!manualAddForm._src_account_name ? 'review-assign' : ''}`}
-                  onClick={() => setManualAddPicker('src')}
-                >
-                  {manualAddForm._src_account_name || '+ Select bank / CC account'}
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                </button>
-              </div>
+                {/* Right Side: Accounts */}
+                <div style={{ flex: '1', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {/* Source Account */}
+                  <div className="review-field" style={{ flex: 1 }}>
+                    <label className="review-field-label">Source Account</label>
+                    <button
+                      className={`review-account-btn ${!manualAddForm._src_account_name ? 'review-assign' : ''}`}
+                      onClick={() => setManualAddPicker('src')}
+                      style={{ flex: 1 }}
+                    >
+                      {manualAddForm._src_account_name || '+ Select bank / CC account'}
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                    </button>
+                  </div>
 
-              {/* Dest Account */}
-              <div className="review-field">
-                <label className="review-field-label">Category / Dest Account</label>
-                <button
-                  className={`review-account-btn ${!manualAddForm._offset_account_name ? 'review-assign' : ''}`}
-                  onClick={() => setManualAddPicker('dest')}
-                >
-                  {manualAddForm._offset_account_name || '+ Assign category'}
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                </button>
+                  {/* Dest Account */}
+                  <div className="review-field" style={{ flex: 1 }}>
+                    <label className="review-field-label">Category / Dest Account</label>
+                    <button
+                      className={`review-account-btn ${!manualAddForm._offset_account_name ? 'review-assign' : ''}`}
+                      onClick={() => setManualAddPicker('dest')}
+                      style={{ flex: 1 }}
+                    >
+                      {manualAddForm._offset_account_name || '+ Assign category'}
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* Note */}
@@ -3095,6 +3270,17 @@ const Transactions = () => {
               }}
             />
           )}
+        </div>
+      )}
+
+      {isBulkAssignOpen && (
+        <div style={{ position: 'fixed', zIndex: 1300 }}>
+          <AccountPickerModal
+            onClose={() => setIsBulkAssignOpen(false)}
+            preloadedAccounts={cachedAccounts}
+            onAccountCreated={handleAccountCreated}
+            onSelect={handleBulkAssignAccountSelect}
+          />
         </div>
       )}
     </div>

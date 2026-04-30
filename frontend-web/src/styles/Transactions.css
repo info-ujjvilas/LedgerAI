@@ -1,9 +1,11 @@
 .transactions-container {
-  padding: 40px;
+  padding: 32px;
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: 100vh;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .page-header {
@@ -113,6 +115,8 @@
   flex-grow: 1;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .placeholder-table {
@@ -123,6 +127,7 @@
   display: flex;
   flex-direction: column;
   flex-grow: 1;
+  min-height: 0;
 }
 
 .table-header {
@@ -142,6 +147,7 @@
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Empty or Loading State Centering */
@@ -154,27 +160,116 @@
   text-align: center;
 }
 
-.table-row {
+.table-header.uniform-layout,
+.table-row.uniform-layout {
   display: grid;
-  grid-template-columns: 110px 1fr 110px 130px 150px 160px 80px;
+  grid-template-columns: 30px 90px 1fr 110px 220px 130px 130px;
   gap: 16px;
-  padding: 14px 24px;
-  align-items: start;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  align-items: flex-start;
+}
+
+.table-header.uniform-layout {
+  padding: 16px 24px;
+  background: rgba(0, 0, 0, 0.1);
+  border-bottom: 1px solid var(--glass-border);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 800;
+  align-items: center;
+}
+
+.table-row.uniform-layout {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--glass-border);
+  position: relative;
+  transition: background-color 0.15s ease;
   font-size: 14px;
   color: var(--text-primary);
-  transition: background 0.2s ease;
 }
 
-.table-row:hover {
-  background: rgba(255, 255, 255, 0.02);
+.table-row.uniform-layout.row-debit {
+  border-left: 4px solid rgba(239, 68, 68, 0.4);
 }
 
-.details-cell {
-  word-wrap: break-word;
+.table-row.uniform-layout.row-credit {
+  border-left: 4px solid rgba(16, 185, 129, 0.4);
+}
+
+.table-row.uniform-layout:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+body.light-mode .table-row.uniform-layout:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.details-cell.raw-details {
+  word-break: break-all;
   overflow-wrap: break-word;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 14px;
   line-height: 1.4;
-  max-width: 100%;
+  white-space: normal;
+  color: var(--text-secondary);
+}
+
+.account-directional-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+.account-src, .account-dest {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--glass-border);
+  white-space: nowrap;
+}
+.account-src:hover, .account-dest:hover {
+  border-color: var(--accent-color);
+}
+.account-arrow {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.slide-approve-wrapper {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 16px 0 32px;
+  background: linear-gradient(to right, transparent, var(--bg-secondary) 30%, var(--bg-secondary));
+  transform: translateX(100%);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s;
+  opacity: 0;
+  pointer-events: none;
+}
+.table-row.uniform-layout:hover .slide-approve-wrapper {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.slide-approve-btn {
+  background: var(--accent-color);
+  color: white;
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  transition: all 0.2s;
+}
+.slide-approve-btn:hover {
+  filter: brightness(1.1);
 }
 
 .account-cell-clickable {
@@ -939,6 +1034,17 @@
 .review-input:focus {
   border-color: rgba(139, 92, 246, 0.5);
   background: rgba(139, 92, 246, 0.04);
+}
+
+/* Hide spin buttons for amount input */
+.review-amount-input::-webkit-outer-spin-button,
+.review-amount-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.review-amount-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 /* Amount row with Dr/Cr toggle */

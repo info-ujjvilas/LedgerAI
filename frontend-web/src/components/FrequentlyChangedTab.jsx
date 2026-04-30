@@ -67,7 +67,7 @@ const FrequentlyChangedTab = () => {
                                     <span style={styles.statusBadge}>{row.qc_status}</span>
                                 </div>
                                 <div style={{ flex: 1, fontSize: '11px', opacity: 0.5 }}>
-                                    {new Date(row.created_at).toLocaleDateString()}
+                                    {new Date(row.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}
                                 </div>
                             </div>
                         ))

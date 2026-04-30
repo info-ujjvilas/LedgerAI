@@ -568,7 +568,7 @@ export default function ParsingPage() {
                                 }}>
                                     <Code size={12} /> {doc.transaction_parsed_type || 'CODE'}
                                 </span></td>
-                                <td style={{ textAlign: 'center', fontSize: '0.8rem' }}>{new Date(doc.created_at).toLocaleDateString()}</td>
+                                <td style={{ textAlign: 'center', fontSize: '0.8rem' }}>{new Date(doc.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}</td>
                                 <td style={{ textAlign: 'center', padding: '1rem 2rem' }}>
                                     <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'center' }}>
                                         <button

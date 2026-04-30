@@ -64,7 +64,7 @@ const formatCurrency = (amount) => {
 const formatDate = (dateStr) => {
   if (!dateStr) return '';
   const date = new Date(dateStr + 'T00:00:00');
-  return date.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
 };
 
 /**
@@ -525,7 +525,7 @@ const Analytics = () => {
     // Format date range for header
     const fmtDate = (d) => {
       const dt = new Date(d + 'T00:00:00');
-      return dt.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      return dt.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
     };
 
     const exportPLToCSV = () => {
@@ -846,7 +846,7 @@ const Analytics = () => {
 
     const fmtDate = (d) => {
       const dt = new Date(d + 'T00:00:00');
-      return dt.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      return dt.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
     };
 
     const exportBalanceToCSV = () => {

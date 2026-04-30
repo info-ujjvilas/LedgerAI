@@ -607,6 +607,144 @@ async function bulkApproveTransactions(req, res) {
 }
 
 /**
+ * bulkAssignAndApproveTransactions(req, res)
+ * Updates multiple transactions (or creates them if missing) with a new offset_account_id,
+ * sets categorised_by to MANUAL, and marks them as approved and posted.
+ * Expects req.body.uncategorized_transaction_ids = array of ids and req.body.offset_account_id
+ */
+async function bulkAssignAndApproveTransactions(req, res) {
+  try {
+    const { uncategorized_transaction_ids, offset_account_id } = req.body;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'User authentication failed.' });
+    if (!Array.isArray(uncategorized_transaction_ids) || uncategorized_transaction_ids.length === 0) {
+      return res.status(400).json({ error: 'uncategorized_transaction_ids must be a non-empty array.' });
+    }
+    if (!offset_account_id) return res.status(400).json({ error: 'Missing offset_account_id.' });
+
+    const { data: newAccount } = await supabase
+      .from('accounts')
+      .select('account_name')
+      .eq('account_id', offset_account_id)
+      .single();
+
+    if (newAccount?.account_name === 'Uncategorised Expense' || newAccount?.account_name === 'Uncategorised Income') {
+      return res.status(400).json({ error: 'Cannot assign to an uncategorised account.' });
+    }
+
+    // Step 1: Update existing transactions
+    const { data: updatedTxns, error: updateError } = await supabase
+      .from('transactions')
+      .update({
+        offset_account_id,
+        categorised_by: 'MANUAL',
+        is_uncategorised: false,
+        review_status: 'APPROVED',
+        posting_status: 'POSTED'
+      })
+      .in('uncategorized_transaction_id', uncategorized_transaction_ids)
+      .eq('user_id', userId)
+      .select('transaction_id, uncategorized_transaction_id');
+
+    if (updateError) {
+      console.error('Bulk update error in assign/approve:', updateError);
+      return res.status(500).json({ error: 'Failed to assign and approve transactions.' });
+    }
+
+    const updatedUncatIds = new Set((updatedTxns || []).map(t => t.uncategorized_transaction_id));
+    const uncatIdsToCreate = uncategorized_transaction_ids.filter(id => !updatedUncatIds.has(id));
+
+    // Step 2: Insert missing transactions (for truly uncategorised rows)
+    let newTxnIds = [];
+    if (uncatIdsToCreate.length > 0) {
+      const { data: uncatRows } = await supabase
+        .from('uncategorized_transactions')
+        .select('uncategorized_transaction_id, account_id, document_id, txn_date, details, debit, credit')
+        .in('uncategorized_transaction_id', uncatIdsToCreate)
+        .eq('user_id', userId);
+
+      if (uncatRows && uncatRows.length > 0) {
+        const insertPayload = uncatRows.map(row => ({
+          user_id: userId,
+          base_account_id: row.account_id,
+          offset_account_id: offset_account_id,
+          document_id: row.document_id,
+          transaction_date: row.txn_date,
+          details: row.details,
+          amount: row.debit || row.credit,
+          transaction_type: row.debit > 0 ? 'DEBIT' : 'CREDIT',
+          categorised_by: 'MANUAL',
+          confidence_score: 1.00,
+          posting_status: 'POSTED',
+          review_status: 'APPROVED',
+          attention_level: 'LOW',
+          uncategorized_transaction_id: row.uncategorized_transaction_id
+        }));
+
+        const { data: insertedTxns, error: insertError } = await supabase
+          .from('transactions')
+          .insert(insertPayload)
+          .select('transaction_id');
+
+        if (insertError) {
+          console.error('Bulk insert error in assign/approve:', insertError);
+          return res.status(500).json({ error: 'Failed to assign and approve missing transactions.' });
+        }
+        newTxnIds = insertedTxns ? insertedTxns.map(t => t.transaction_id) : [];
+      }
+    }
+
+    const approvedIds = [...(updatedTxns ? updatedTxns.map(t => t.transaction_id) : []), ...newTxnIds];
+    const approvedCount = approvedIds.length;
+
+    res.status(200).json({ success: true, approved_count: approvedCount });
+
+    // Background processing
+    if (approvedIds.length > 0) {
+      setImmediate(async () => {
+        try {
+          const { data: txnRows } = await supabase
+            .from('transactions')
+            .select('transaction_id, base_account_id, offset_account_id, amount, transaction_type, transaction_date, details, clean_merchant_name, is_contra, extracted_id')
+            .in('transaction_id', approvedIds)
+            .eq('user_id', userId);
+
+          if (!txnRows || txnRows.length === 0) return;
+
+          const allLedgerRows = [];
+          for (const txn of txnRows) {
+            const entries = buildLedgerRows(txn, userId);
+            allLedgerRows.push(...entries);
+          }
+
+          if (allLedgerRows.length > 0) {
+            const { error: ledgerError } = await supabase.from('ledger_entries').insert(allLedgerRows);
+            if (ledgerError) console.error('Background bulk ledger insert failed:', ledgerError);
+          }
+
+          await Promise.all(txnRows.map(txn => {
+            if (txn.is_contra) return Promise.resolve();
+            if (txn.extracted_id) {
+              return upsertExactCache(userId, txn.extracted_id, txn.offset_account_id);
+            }
+            const name = txn.clean_merchant_name || txn.details;
+            return upsertVectorCache(userId, name, txn.offset_account_id);
+          }));
+
+          console.log(`✅ Background bulk assign & approve complete for ${txnRows.length} transactions`);
+        } catch (bgError) {
+          console.error('❌ Background bulk assign & approve processing failed:', bgError);
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Unexpected error in bulkAssignAndApproveTransactions:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+/**
  * manualCategorizeTransaction(req, res)
  * Creates a new transaction row from an uncategorized transaction.
  * User manually selects the offset_account_id.
@@ -1411,6 +1549,7 @@ module.exports = {
   recategorizeTransaction,
   approveTransaction,
   bulkApproveTransactions,
+  bulkAssignAndApproveTransactions,
   manualCategorizeTransaction,
   correctTransaction,
   updateSourceAccount,

@@ -149,7 +149,7 @@ const VectorCacheTab = () => {
                                 <div style={{ flex: 1 }}>
                                     <span style={styles.approvalBadge}>{row.approval_count}</span>
                                 </div>
-                                <div style={{ flex: 1, fontSize: '10px', opacity: 0.5 }}>{new Date(row.created_at).toLocaleDateString()}</div>
+                                <div style={{ flex: 1, fontSize: '10px', opacity: 0.5 }}>{new Date(row.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}</div>
                                 <div style={{ width: '60px', display: 'flex', justifyContent: 'center' }}>
                                     <button style={styles.iconBtn} onClick={() => handleDelete(row.cache_id)}><Trash2 size={14}/></button>
                                 </div>
