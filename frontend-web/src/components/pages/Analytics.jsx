@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../shared/supabase';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -76,7 +77,10 @@ const COGS_KEYWORDS = [
   'direct farming costs', 'direct material costs', 'direct cost',
 ];
 const Analytics = () => {
-  const [view, setView] = useState('pl');           // 'pl' | 'balance' | 'ledger'
+  const navigate = useNavigate();
+  const location = useLocation();
+  const initialTab = new URLSearchParams(location.search).get('tab');
+  const [view, setView] = useState(initialTab === 'balance' ? 'balance' : initialTab === 'ledger' ? 'ledger' : 'pl');  // 'pl' | 'balance' | 'ledger'
   const [period, setPeriod] = useState('all');      // 'month' | 'quarter' | 'year' | 'all' | 'custom'
   const [loading, setLoading] = useState(true);
   const [plData, setPlData] = useState(null);
@@ -212,14 +216,14 @@ const Analytics = () => {
             
             if (type === 'INCOME') {
               if (!incomeGroups[rootParent]) incomeGroups[rootParent] = {};
-              incomeGroups[rootParent][accountName] = 0;
+              incomeGroups[rootParent][accountName] = { amount: 0, txns: [] };
             } else if (type === 'EXPENSE') {
               const isCogs = COGS_KEYWORDS.some(kw => rootParent.toLowerCase().includes(kw));
               if (isCogs) {
-                cogsGroup[accountName] = 0;
+                cogsGroup[accountName] = { amount: 0, txns: [] };
               } else {
                 if (!expenseGroups[rootParent]) expenseGroups[rootParent] = {};
-                expenseGroups[rootParent][accountName] = 0;
+                expenseGroups[rootParent][accountName] = { amount: 0, txns: [] };
               }
             }
           }
@@ -239,16 +243,30 @@ const Analytics = () => {
           
           if (rootParent.toLowerCase().includes('uncategor') || rootParent.toLowerCase().includes('unclassifi')) return;
 
+          const formattedTxn = {
+             uncategorized_transaction_id: txn.transaction_id,
+             txn_date: txn.transaction_date,
+             details: txn.details,
+             debit: txn.transaction_type === 'DEBIT' ? amt : 0,
+             credit: txn.transaction_type === 'CREDIT' ? amt : 0
+          };
+
           if (type === 'INCOME') {
             if (!incomeGroups[rootParent]) incomeGroups[rootParent] = {};
-            incomeGroups[rootParent][accountName] = (incomeGroups[rootParent][accountName] || 0) + amt;
+            if (!incomeGroups[rootParent][accountName]) incomeGroups[rootParent][accountName] = { amount: 0, txns: [] };
+            incomeGroups[rootParent][accountName].amount += amt;
+            incomeGroups[rootParent][accountName].txns.push(formattedTxn);
           } else if (type === 'EXPENSE') {
             const isCogs = COGS_KEYWORDS.some(kw => rootParent.toLowerCase().includes(kw));
             if (isCogs) {
-              cogsGroup[accountName] = (cogsGroup[accountName] || 0) + amt;
+              if (!cogsGroup[accountName]) cogsGroup[accountName] = { amount: 0, txns: [] };
+              cogsGroup[accountName].amount += amt;
+              cogsGroup[accountName].txns.push(formattedTxn);
             } else {
               if (!expenseGroups[rootParent]) expenseGroups[rootParent] = {};
-              expenseGroups[rootParent][accountName] = (expenseGroups[rootParent][accountName] || 0) + amt;
+              if (!expenseGroups[rootParent][accountName]) expenseGroups[rootParent][accountName] = { amount: 0, txns: [] };
+              expenseGroups[rootParent][accountName].amount += amt;
+              expenseGroups[rootParent][accountName].txns.push(formattedTxn);
             }
           }
         });
@@ -277,12 +295,16 @@ const Analytics = () => {
             if (credit > 0) {
               const catName = (offsetAcc?.account_type === 'INCOME') ? offsetAcc.account_name : 'Pending Income';
               if (!incomeGroups['Pending']) incomeGroups['Pending'] = {};
-              incomeGroups['Pending'][catName] = (incomeGroups['Pending'][catName] || 0) + credit;
+              if (!incomeGroups['Pending'][catName]) incomeGroups['Pending'][catName] = { amount: 0, txns: [] };
+              incomeGroups['Pending'][catName].amount += credit;
+              incomeGroups['Pending'][catName].txns.push(txn);
             }
             if (debit > 0) {
               const catName = (offsetAcc?.account_type === 'EXPENSE') ? offsetAcc.account_name : 'Pending Expense';
               if (!expenseGroups['Pending']) expenseGroups['Pending'] = {};
-              expenseGroups['Pending'][catName] = (expenseGroups['Pending'][catName] || 0) + debit;
+              if (!expenseGroups['Pending'][catName]) expenseGroups['Pending'][catName] = { amount: 0, txns: [] };
+              expenseGroups['Pending'][catName].amount += debit;
+              expenseGroups['Pending'][catName].txns.push(txn);
             }
           });
         }
@@ -290,9 +312,9 @@ const Analytics = () => {
         // Step 4: Compute totals
         const toSorted = (obj) =>
           Object.entries(obj)
-            .map(([name, amount]) => ({ name, amount }))
+            .map(([name, data]) => ({ name, amount: data.amount, txns: data.txns }))
             .sort((a, b) => b.amount - a.amount);
-        const sumGroup = (obj) => Object.values(obj).reduce((s, v) => s + v, 0);
+        const sumGroup = (obj) => Object.values(obj).reduce((s, v) => s + v.amount, 0);
 
         const incomeGroupsArray = Object.entries(incomeGroups)
           .map(([groupName, items]) => ({
@@ -488,6 +510,12 @@ const Analytics = () => {
   useEffect(() => {
     fetchData();
   }, [period, view, selectedAccountId, includePending, customFrom, customTo]);
+
+  const handleItemClick = (item) => {
+    if (item.amount !== 0 && item.txns && item.txns.length > 0) {
+      navigate('/category/' + encodeURIComponent(item.name), { state: { txns: item.txns, backTo: '/analytics' } });
+    }
+  };
 
   /**
    * Render P&L View — Zoho Books style table format
@@ -710,8 +738,8 @@ const Analytics = () => {
             <React.Fragment key={`inc-group-${gIdx}`}>
               <div className="pl-section-heading">{group.groupName}</div>
               {group.items.map((item, idx) => (
-                <div key={`inc-item-${gIdx}-${idx}`} className="pl-row">
-                  <div className="pl-col-account pl-indent">{item.name}</div>
+                <div key={`inc-item-${gIdx}-${idx}`} className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default' }}>
+                  <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
                   <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
                 </div>
               ))}
@@ -748,8 +776,8 @@ const Analytics = () => {
                 </div>
               ) : (
                 cogsItems.map((item, idx) => (
-                  <div key={`cogs-${idx}`} className="pl-row">
-                    <div className="pl-col-account pl-indent">{item.name}</div>
+                  <div key={`cogs-${idx}`} className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default' }}>
+                    <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
                     <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
                   </div>
                 ))
@@ -772,8 +800,8 @@ const Analytics = () => {
              <React.Fragment key={`exp-group-${gIdx}`}>
                <div className="pl-section-heading">{group.groupName}</div>
                {group.items.map((item, idx) => (
-                 <div key={`exp-item-${gIdx}-${idx}`} className="pl-row">
-                   <div className="pl-col-account pl-indent">{item.name}</div>
+                 <div key={`exp-item-${gIdx}-${idx}`} className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default' }}>
+                   <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
                    <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
                  </div>
                ))}

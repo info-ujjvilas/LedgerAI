@@ -14,25 +14,52 @@ const Overview = () => {
   const [activeBarIndex, setActiveBarIndex] = useState(null);
   const [activeDonutIndex, setActiveDonutIndex] = useState(null);
   const [breakdownModal, setBreakdownModal] = useState({ isOpen: false, type: null, data: [] });
-  const [categoryTxnModal, setCategoryTxnModal] = useState({ isOpen: false, categoryName: '', txns: [] });
+  const [globalLedgerMap, setGlobalLedgerMap] = useState({});
   // Ledger-based asset/liability state — computed identically to Analytics Balance Sheet
   const [assetsLedger, setAssetsLedger] = useState({ total: 0, breakdown: [] });
   const [liabilitiesLedger, setLiabilitiesLedger] = useState({ total: 0, breakdown: [] });
 
   const handleStatClick = (type) => {
-    if (type === 'INCOME') setBreakdownModal({ isOpen: true, type: 'Income Breakdown', data: incomeBreakdown });
-    else if (type === 'EXPENSE') setBreakdownModal({ isOpen: true, type: 'Expense Breakdown', data: expenseBreakdown });
+    if (type === 'INCOME') setBreakdownModal({ isOpen: true, type: 'Income Breakdown', data: incomeBreakdown, modalType: 'INCOME' });
+    else if (type === 'EXPENSE') setBreakdownModal({ isOpen: true, type: 'Expense Breakdown', data: expenseBreakdown, modalType: 'EXPENSE' });
     // Assets/Liabilities use ledger-based breakdown (matches Analytics Balance Sheet)
-    else if (type === 'ASSETS') setBreakdownModal({ isOpen: true, type: 'Total Assets Breakdown', data: assetsLedger.breakdown });
-    else if (type === 'LIABILITIES') setBreakdownModal({ isOpen: true, type: 'Total Liabilities Breakdown', data: liabilitiesLedger.breakdown });
+    else if (type === 'ASSETS') setBreakdownModal({ isOpen: true, type: 'Total Assets Breakdown', data: assetsLedger.breakdown, modalType: 'ASSETS' });
+    else if (type === 'LIABILITIES') {
+      // Enrich liabilities breakdown with account subtype tags
+      const enriched = Object.values(globalLedgerMap)
+        .filter(acc => acc.account_type === 'LIABILITY')
+        .map(acc => {
+          const balance = acc.balance_nature === 'CREDIT'
+            ? acc.totalCredit - acc.totalDebit
+            : acc.totalDebit - acc.totalCredit;
+          // Determine subtype tag: overdraft bank or credit card
+          const tag = acc.balance_nature === 'DEBIT' ? 'Bank Overdraft' : 'Credit Card';
+          return { name: acc.account_name, amount: balance, tag };
+        })
+        .sort((a, b) => b.amount - a.amount);
+      setBreakdownModal({ isOpen: true, type: 'Total Liabilities Breakdown', data: enriched, modalType: 'LIABILITIES' });
+    }
     else if (type === 'SAVINGS' || type === 'BALANCE') {
+      // Per-account balance breakdown
+      const perAccount = Object.values(globalLedgerMap)
+        .filter(acc => acc.account_type === 'ASSET')
+        .map(acc => {
+          const balance = acc.balance_nature === 'DEBIT'
+            ? acc.totalDebit - acc.totalCredit
+            : acc.totalCredit - acc.totalDebit;
+          return { name: acc.account_name, amount: balance };
+        })
+        .sort((a, b) => b.amount - a.amount);
+      const summaryRows = [
+        { name: 'Total Income', amount: stats.income, isSummary: true },
+        { name: 'Total Expenses', amount: -stats.expense, isSummary: true },
+        { name: 'Net Savings', amount: stats.savings, isSummary: true, isBold: true },
+      ];
       setBreakdownModal({
         isOpen: true,
         type: type === 'SAVINGS' ? 'Net Savings Breakdown' : 'Balance Breakdown',
-        data: [
-          { name: 'Total Inflow (Income)', amount: stats.income },
-          { name: 'Total Outflow (Expense)', amount: -stats.expense }
-        ]
+        data: [...summaryRows, ...perAccount],
+        modalType: type,
       });
     }
   };
@@ -40,6 +67,47 @@ const Overview = () => {
   useEffect(() => {
     fetchData();
   }, []);
+
+  useEffect(() => {
+    if (Object.keys(globalLedgerMap).length === 0) return;
+
+    let totalAssetsVal = 0;
+    let totalLiabilitiesVal = 0;
+    const assetsBreakdownMap = {};
+    const liabilitiesBreakdownMap = {};
+
+    Object.values(globalLedgerMap).forEach(acc => {
+      // Intentionally NOT filtering by selectedAccountId.
+      // Total Assets and Total Liabilities represent the global Balance Sheet.
+
+      const balance = acc.balance_nature === 'DEBIT'
+        ? acc.totalDebit - acc.totalCredit
+        : acc.totalCredit - acc.totalDebit;
+
+      if (acc.account_type === 'ASSET') {
+        totalAssetsVal += balance;
+        if (!assetsBreakdownMap[acc.account_name]) assetsBreakdownMap[acc.account_name] = 0;
+        assetsBreakdownMap[acc.account_name] += balance;
+      } else if (acc.account_type === 'LIABILITY') {
+        totalLiabilitiesVal += balance;
+        if (!liabilitiesBreakdownMap[acc.account_name]) liabilitiesBreakdownMap[acc.account_name] = 0;
+        liabilitiesBreakdownMap[acc.account_name] += balance;
+      }
+    });
+
+    setAssetsLedger({
+      total: totalAssetsVal,
+      breakdown: Object.entries(assetsBreakdownMap)
+        .map(([name, amount]) => ({ name, amount }))
+        .sort((a, b) => b.amount - a.amount)
+    });
+    setLiabilitiesLedger({
+      total: totalLiabilitiesVal,
+      breakdown: Object.entries(liabilitiesBreakdownMap)
+        .map(([name, amount]) => ({ name, amount }))
+        .sort((a, b) => b.amount - a.amount)
+    });
+  }, [globalLedgerMap, selectedAccountId]);
 
   const fetchData = async () => {
     try {
@@ -124,44 +192,8 @@ const Overview = () => {
         );
       };
 
-      // Compute net balance per account using balance_nature
-      let totalAssetsVal = 0;
-      let totalLiabilitiesVal = 0;
-      const assetsBreakdownMap = {};
-      const liabilitiesBreakdownMap = {};
-
-      Object.values(ledgerMap).forEach(acc => {
-        // For Assets/Liabilities to be 'Correct', we must include all accounts,
-        // even generic ones, otherwise the total isn't a true representation of the cash/debt state.
-
-        // balance_nature DEBIT means the account normally has a debit balance (asset)
-        const balance = acc.balance_nature === 'DEBIT'
-          ? acc.totalDebit - acc.totalCredit
-          : acc.totalCredit - acc.totalDebit;
-
-        if (acc.account_type === 'ASSET') {
-          totalAssetsVal += balance;
-          if (!assetsBreakdownMap[acc.account_name]) assetsBreakdownMap[acc.account_name] = 0;
-          assetsBreakdownMap[acc.account_name] += balance;
-        } else if (acc.account_type === 'LIABILITY') {
-          totalLiabilitiesVal += balance;
-          if (!liabilitiesBreakdownMap[acc.account_name]) liabilitiesBreakdownMap[acc.account_name] = 0;
-          liabilitiesBreakdownMap[acc.account_name] += balance;
-        }
-      });
-
-      setAssetsLedger({
-        total: totalAssetsVal,
-        breakdown: Object.entries(assetsBreakdownMap)
-          .map(([name, amount]) => ({ name, amount }))
-          .sort((a, b) => b.amount - a.amount)
-      });
-      setLiabilitiesLedger({
-        total: totalLiabilitiesVal,
-        breakdown: Object.entries(liabilitiesBreakdownMap)
-          .map(([name, amount]) => ({ name, amount }))
-          .sort((a, b) => b.amount - a.amount)
-      });
+      // Save ledger map to state so it can be dynamically filtered
+      setGlobalLedgerMap(ledgerMap);
 
     } catch (err) {
       console.error('Error fetching overview data:', err);
@@ -442,7 +474,9 @@ const Overview = () => {
           </div>
           <div className="stat-info">
             <span className="stat-label">Total Assets</span>
-            <span className="stat-value">{formatCurrency(Math.abs(assetsLedger.total))}</span>
+            <span className="stat-value" style={{ color: assetsLedger.total < 0 ? '#ef4444' : 'inherit' }}>
+              {formatCurrency(assetsLedger.total)}
+            </span>
           </div>
         </div>
 
@@ -452,7 +486,9 @@ const Overview = () => {
           </div>
           <div className="stat-info">
             <span className="stat-label">Total Liabilities</span>
-            <span className="stat-value">{formatCurrency(Math.abs(liabilitiesLedger.total))}</span>
+            <span className="stat-value" style={{ color: liabilitiesLedger.total < 0 ? '#ef4444' : 'inherit' }}>
+              {formatCurrency(liabilitiesLedger.total)}
+            </span>
           </div>
         </div>
       </div>
@@ -527,7 +563,7 @@ const Overview = () => {
               <div
                 className="expense-item"
                 key={i}
-                onClick={() => setCategoryTxnModal({ isOpen: true, categoryName: exp.name, txns: exp.txns })}
+                onClick={() => navigate('/category/' + encodeURIComponent(exp.name), { state: { txns: exp.txns } })}
                 style={{ cursor: 'pointer', padding: '4px', margin: '-4px', borderRadius: '6px' }}
                 onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-primary)'}
                 onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
@@ -608,7 +644,7 @@ const Overview = () => {
                   <div
                     className="donut-legend-item"
                     key={i}
-                    onClick={() => setCategoryTxnModal({ isOpen: true, categoryName: exp.name, txns: exp.txns })}
+                    onClick={() => navigate('/category/' + encodeURIComponent(exp.name), { state: { txns: exp.txns } })}
                     onMouseEnter={() => setActiveDonutIndex(i)}
                     onMouseLeave={() => setActiveDonutIndex(null)}
                     style={{
@@ -708,60 +744,100 @@ const Overview = () => {
               <button className="close-btn" onClick={() => setBreakdownModal({ isOpen: false, type: null, data: [] })}>✕</button>
             </div>
             <div className="modal-body">
-              {breakdownModal.data.map((item, i) => (
-                <div key={i} className="breakdown-item">
-                  <span className="breakdown-name">{item.name}</span>
-                  <span className="breakdown-amount">{formatCurrency(Math.abs(item.amount))}</span>
-                </div>
-              ))}
+              {breakdownModal.data.map((item, i) => {
+                const isClickable = !item.isSummary && !item.isBold && item.txns && item.txns.length > 0;
+                return (
+                  <div
+                    key={i}
+                    className="breakdown-item"
+                    onClick={() => {
+                      if (!isClickable) return;
+                      setBreakdownModal({ isOpen: false, type: null, data: [] });
+                      navigate('/category/' + encodeURIComponent(item.name), {
+                        state: { txns: item.txns, backTo: '/overview' }
+                      });
+                    }}
+                    style={{
+                      borderTop: item.isBold ? '1px solid var(--border-color)' : undefined,
+                      paddingTop: item.isBold ? '10px' : undefined,
+                      marginTop: item.isBold ? '6px' : undefined,
+                      fontWeight: item.isBold ? 700 : item.isSummary ? 600 : 400,
+                      cursor: isClickable ? 'pointer' : 'default',
+                      borderRadius: isClickable ? '6px' : undefined,
+                      padding: isClickable ? '4px 6px' : undefined,
+                      margin: isClickable ? '-4px -6px' : undefined,
+                      transition: 'background 0.15s',
+                    }}
+                    onMouseEnter={(e) => { if (isClickable) e.currentTarget.style.background = 'var(--bg-primary)'; }}
+                    onMouseLeave={(e) => { if (isClickable) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    <span className="breakdown-name" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={isClickable ? { color: 'var(--primary-action, #6366f1)', textDecoration: 'underline' } : {}}>
+                        {item.name}
+                      </span>
+                      {item.tag && (
+                        <span style={{
+                          fontSize: '10px', fontWeight: 600, padding: '2px 7px', borderRadius: '999px',
+                          background: item.tag === 'Credit Card' ? '#fef3c7' : '#fee2e2',
+                          color: item.tag === 'Credit Card' ? '#92400e' : '#991b1b',
+                        }}>
+                          {item.tag}
+                        </span>
+                      )}
+                      {isClickable && (
+                        <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}>
+                          <path d="M5 12H19M12 5l7 7-7 7"/>
+                        </svg>
+                      )}
+                    </span>
+                    <span className="breakdown-amount" style={{ color: item.amount < 0 ? '#ef4444' : 'inherit' }}>
+                      {formatCurrency(item.amount)}
+                    </span>
+                  </div>
+                );
+              })}
               {breakdownModal.data.length === 0 && <div className="empty-state">No data available.</div>}
+            </div>
+            {/* Redirect footer */}
+            <div style={{
+              padding: '12px 20px',
+              borderTop: '1px solid var(--border-color)',
+              display: 'flex',
+              justifyContent: 'flex-end',
+            }}>
+              <button
+                onClick={() => {
+                  setBreakdownModal({ isOpen: false, type: null, data: [] });
+                  navigate(
+                    breakdownModal.modalType === 'ASSETS' || breakdownModal.modalType === 'LIABILITIES'
+                      ? '/analytics?tab=balance'
+                      : '/transactions'
+                  );
+                }}
+                style={{
+                  background: 'var(--accent-gradient, #6366f1)',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  padding: '8px 18px',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+              >
+                {breakdownModal.modalType === 'ASSETS' || breakdownModal.modalType === 'LIABILITIES'
+                  ? 'View Balance Sheet →'
+                  : 'View All Transactions →'}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {categoryTxnModal.isOpen && (
-        <div className="modal-overlay" onClick={() => setCategoryTxnModal({ isOpen: false, categoryName: '', txns: [] })}>
-          <div className="modal-content" style={{ maxWidth: '650px' }} onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 style={{ fontSize: '18px' }}>{categoryTxnModal.categoryName} <span style={{ color: 'var(--text-secondary)', fontWeight: 500, marginLeft: '4px' }}>({categoryTxnModal.txns.length} transactions)</span></h2>
-              <button className="close-btn" onClick={() => setCategoryTxnModal({ isOpen: false, categoryName: '', txns: [] })}>✕</button>
-            </div>
-            <div className="modal-body" style={{ maxHeight: '60vh', padding: 0 }}>
-              <table className="recent-transactions-table" style={{ margin: 0 }}>
-                <thead style={{ position: 'sticky', top: 0, background: 'var(--bg-secondary)', zIndex: 1 }}>
-                  <tr>
-                    <th style={{ padding: '16px 24px' }}>DATE</th>
-                    <th style={{ padding: '16px 24px' }}>DETAILS</th>
-                    <th style={{ padding: '16px 24px', textAlign: 'right' }}>AMOUNT</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {categoryTxnModal.txns.map(txn => {
-                    const isDebit = txn.debit > 0;
-                    const amt = isDebit ? txn.debit : txn.credit;
-                    const sign = isDebit ? '-' : '+';
-                    const dateSplit = txn.txn_date.split('-');
-                    const displayDate = dateSplit.length === 3 ? `${dateSplit[2]}/${dateSplit[1]}/${dateSplit[0]}` : txn.txn_date;
-                    return (
-                      <tr key={txn.uncategorized_transaction_id}>
-                        <td style={{ padding: '16px 24px' }}>{displayDate}</td>
-                        <td className="txn-details" style={{ padding: '16px 24px' }}>{txn.details}</td>
-                        <td className={`txn-amount ${isDebit ? 'negative' : 'positive'}`} style={{ padding: '16px 24px', textAlign: 'right' }}>
-                          {sign}{formatCurrency(amt)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {categoryTxnModal.txns.length === 0 && (
-                    <tr><td colSpan="3" className="empty-state">No transactions found.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
+
     </div>
   );
 };

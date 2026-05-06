@@ -139,7 +139,7 @@ def create_user_account(user_id: str, account_data: dict) -> dict:
             "user_id": user_id,
             "account_name": acc_name,
             "account_type": "LIABILITY" if is_credit else "ASSET",
-            "balance_nature": "DEBIT",
+            "balance_nature": "CREDIT" if is_credit else "DEBIT",
             "is_system_generated": False,
             "parent_account_id": parent_account_id,
             "is_active": True
