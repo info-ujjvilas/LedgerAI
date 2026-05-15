@@ -1,155 +1,83 @@
 import React from 'react';
 import { ICONS } from '../Icons';
 import { useAuth } from '../../shared/hooks/useAuth';
-import '../../styles/Accounts.css';
+import '../../styles/Settings.css';
 
-const Settings = ({ onClose, toggleTheme, isDarkMode }) => {
+const Settings = ({ toggleTheme, isDarkMode }) => {
   const { user } = useAuth();
   const email = user?.email || '—';
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Settings</h2>
-          <button className="close-modal-btn" onClick={onClose} aria-label="Close settings">✕</button>
+    <div className="settings-container">
+      <div className="page-header">
+        <div className="header-title">
+          <h1>Settings</h1>
+          <p>Manage your account and app preferences.</p>
+        </div>
+      </div>
+
+      <div className="settings-content">
+        {/* ── Profile ── */}
+        <div className="settings-card">
+          <div className="card-header">
+            <span className="card-icon">👤</span>
+            <h2>Profile</h2>
+          </div>
+          <div className="card-body">
+            <div className="form-group">
+              <label className="form-label">Email Address</label>
+              <div className="static-field">
+                {email}
+                <span className="lock-badge">System Locked</span>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div className="modal-body" style={{ gap: '28px' }}>
-
-          {/* ── Profile ── */}
-          <section>
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: '8px',
-              marginBottom: '14px', paddingBottom: '10px',
-              borderBottom: '1px solid var(--glass-border)'
-            }}>
-              <span style={{ fontSize: '16px' }}>👤</span>
-              <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)', letterSpacing: '0.3px' }}>
-                Profile
-              </span>
-            </div>
-            <div className="form-group">
-              <label className="form-label" htmlFor="settings-email">Email</label>
-              <input
-                id="settings-email"
-                className="form-input"
-                type="email"
-                value={email}
-                readOnly
-                disabled
-                style={{ cursor: 'default' }}
-              />
-            </div>
-          </section>
-
-          {/* ── Appearance ── */}
-          <section>
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: '8px',
-              marginBottom: '14px', paddingBottom: '10px',
-              borderBottom: '1px solid var(--glass-border)'
-            }}>
-              <span style={{ fontSize: '16px' }}>🎨</span>
-              <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)', letterSpacing: '0.3px' }}>
-                Appearance
-              </span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div className="form-label" style={{ marginBottom: '2px' }}>Theme</div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  {isDarkMode ? 'Dark mode is active' : 'Light mode is active'}
-                </div>
+        {/* ── Appearance ── */}
+        <div className="settings-card">
+          <div className="card-header">
+            <span className="card-icon">🎨</span>
+            <h2>Appearance</h2>
+          </div>
+          <div className="card-body">
+            <div className="settings-row">
+              <div className="row-info">
+                <h3>Theme</h3>
+                <p>{isDarkMode ? 'Dark mode is currently active' : 'Light mode is currently active'}</p>
               </div>
-              <button
-                id="settings-theme-toggle"
+              <button 
+                className="theme-toggle-btn" 
                 onClick={toggleTheme}
-                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '8px',
-                  padding: '9px 16px',
-                  borderRadius: '10px',
-                  border: '1px solid var(--glass-border)',
-                  background: 'var(--bg-primary)',
-                  color: 'var(--text-primary)',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  fontFamily: 'inherit',
-                  transition: 'all 0.2s ease',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = 'var(--accent-color)';
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = 'var(--glass-border)';
-                  e.currentTarget.style.transform = 'translateY(0)';
-                }}
               >
-                {isDarkMode ? <ICONS.Sun width={15} height={15} /> : <ICONS.Moon width={15} height={15} />}
-                {isDarkMode ? 'Light Mode' : 'Dark Mode'}
+                {isDarkMode ? <ICONS.Sun /> : <ICONS.Moon />}
+                {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
               </button>
             </div>
-          </section>
+          </div>
+        </div>
 
-          {/* ── Account ── */}
-          <section>
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: '8px',
-              marginBottom: '14px', paddingBottom: '10px',
-              borderBottom: '1px solid var(--glass-border)'
-            }}>
-              <span style={{ fontSize: '16px' }}>🔐</span>
-              <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)', letterSpacing: '0.3px' }}>
-                Account
-              </span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div className="form-label" style={{ marginBottom: '2px' }}>Sign out</div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  You will be returned to the login screen.
-                </div>
+        {/* ── Account ── */}
+        <div className="settings-card">
+          <div className="card-header">
+            <span className="card-icon">🔐</span>
+            <h2>Account</h2>
+          </div>
+          <div className="card-body">
+            <div className="settings-row">
+              <div className="row-info">
+                <h3>Sign out</h3>
+                <p>You will be returned to the login screen. Your session will be cleared.</p>
               </div>
-              <button
-                id="settings-logout-btn"
-                onClick={() => {
-                  onClose?.();
-                  // Dispatch a custom event for AppLayout to handle the actual signOut
-                  window.dispatchEvent(new CustomEvent('ledgerai:logout'));
-                }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '8px',
-                  padding: '9px 16px',
-                  borderRadius: '10px',
-                  border: '1px solid rgba(166, 61, 64, 0.35)',
-                  background: 'rgba(166, 61, 64, 0.08)',
-                  color: '#F87171',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  fontFamily: 'inherit',
-                  transition: 'all 0.2s ease',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'rgba(166, 61, 64, 0.18)';
-                  e.currentTarget.style.borderColor = '#F87171';
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'rgba(166, 61, 64, 0.08)';
-                  e.currentTarget.style.borderColor = 'rgba(166, 61, 64, 0.35)';
-                  e.currentTarget.style.transform = 'translateY(0)';
-                }}
+              <button 
+                className="logout-action-btn"
+                onClick={() => window.dispatchEvent(new CustomEvent('ledgerai:logout'))}
               >
-                <ICONS.Logout width={15} height={15} />
+                <ICONS.Logout />
                 Log out
               </button>
             </div>
-          </section>
-
+          </div>
         </div>
       </div>
     </div>

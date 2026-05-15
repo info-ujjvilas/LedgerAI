@@ -3,7 +3,6 @@ import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import AccountPickerModal from '../AccountPickerModal';
 import { Toast, useToast } from '../Toast';
 import { supabase } from '../../shared/supabase';
-import { formatDate } from '../../utils/dateUtils';
 import { ICONS } from '../Icons';
 import '../../styles/Transactions.css';
 import API from '../../api/api';
@@ -15,8 +14,7 @@ const ATTENTION_ORDER = ['HIGH', 'MEDIUM', 'LOW'];
 // Small inline editor that appears when the amount cell is clicked
 const AmountEditor = ({ txn, onSave, onCancel }) => {
   const isDebit = txn.debit != null;
-  const initialAmt = isDebit ? txn.debit : txn.credit;
-  const [editAmount, setEditAmount] = useState(initialAmt != null ? Number(initialAmt).toFixed(2) : '');
+  const [editAmount, setEditAmount] = useState(isDebit ? txn.debit : txn.credit);
   const [editType, setEditType] = useState(isDebit ? 'DEBIT' : 'CREDIT');
   const [saving, setSaving] = useState(false);
   const inputRef = useRef(null);
@@ -56,9 +54,6 @@ const AmountEditor = ({ txn, onSave, onCancel }) => {
         min="0"
         value={editAmount}
         onChange={(e) => setEditAmount(e.target.value)}
-        onBlur={(e) => {
-          if (e.target.value) setEditAmount(Number(e.target.value).toFixed(2));
-        }}
         onKeyDown={handleKey}
       />
       <div className="amount-editor-actions">
@@ -194,7 +189,7 @@ const Transactions = () => {
   const navigate = useNavigate();
   const location = useLocation();  // read nav state BEFORE lazy useState inits below
   const [searchParams, setSearchParams] = useSearchParams();
-  const { toasts, exiting, showToast, dismissToast } = useToast();
+  const { toasts, showToast } = useToast();
   const [isCategorizing, setIsCategorizing] = useState(() => {
     return localStorage.getItem('isCategorizing') === 'true';
   });
@@ -216,7 +211,6 @@ const Transactions = () => {
   // ── Pipeline processing state — documents being auto-categorised ————————
   const [processingDocIds, setProcessingDocIds] = useState(new Set());
   const [failedDocIds, setFailedDocIds] = useState(new Set());
-  const [docNames, setDocNames] = useState({});
   const [retrying, setRetrying] = useState(false);
 
   // ── Pipeline progress bar — time-based, synced to real completion ──────────
@@ -265,8 +259,6 @@ const Transactions = () => {
   const [isManualAddOpen, setIsManualAddOpen] = useState(false);
   const [manualAddForm, setManualAddForm] = useState(EMPTY_MANUAL_FORM);
   const [manualAddPicker, setManualAddPicker] = useState(null); // 'src' | 'dest'
-  const [isBulkAssignOpen, setIsBulkAssignOpen] = useState(false);
-  const [isBulkAssigning, setIsBulkAssigning] = useState(false);
   const [manualAddSaving, setManualAddSaving] = useState(false);
   const [manualAddError, setManualAddError] = useState('');
 
@@ -385,16 +377,8 @@ const Transactions = () => {
       if (docIds.length > 0) {
         const { data: docStatuses } = await supabase
           .from('documents')
-          .select('document_id, file_name, grouping_status, pipeline_started_at, created_at')
+          .select('document_id, grouping_status, pipeline_started_at, created_at')
           .in('document_id', docIds);
-
-        if (docStatuses) {
-          setDocNames(prev => {
-            const next = { ...prev };
-            docStatuses.forEach(d => { if (d.file_name) next[d.document_id] = d.file_name; });
-            return next;
-          });
-        }
 
         const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;     // 5 min: running but no finish
         const NULL_PIPELINE_TIMEOUT_MS = 3 * 60 * 1000; // 3 min: never started (backend asleep)
@@ -548,16 +532,8 @@ const Transactions = () => {
     const interval = setInterval(async () => {
       const { data: docStatuses } = await supabase
         .from('documents')
-        .select('document_id, file_name, grouping_status, pipeline_started_at, created_at')
+        .select('document_id, grouping_status, pipeline_started_at, created_at')
         .in('document_id', [...processingDocIds]);
-
-      if (docStatuses) {
-        setDocNames(prev => {
-          const next = { ...prev };
-          docStatuses.forEach(d => { if (d.file_name) next[d.document_id] = d.file_name; });
-          return next;
-        });
-      }
 
       const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;
       const NULL_PIPELINE_TIMEOUT_MS = 3 * 60 * 1000;
@@ -899,38 +875,6 @@ const Transactions = () => {
     })();
   };
 
-  const handleApproveSelected = async () => {
-    if (selectedIds.size === 0) return;
-    
-    // We only approve rows that are categorised (have a transaction_id)
-    const transactionIdsToApprove = filteredTransactions
-      .filter(t => selectedIds.has(t.uncategorized_transaction_id) && t.transactions?.length > 0 && !t.transactions[0].is_uncategorised)
-      .map(t => t.transactions[0].transaction_id);
-
-    if (transactionIdsToApprove.length === 0) {
-      showToast('No categorised transactions selected to approve.', 'info');
-      return;
-    }
-
-    setIsApprovingBulk(true);
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      await fetch(`${API_BASE_URL}/api/transactions/approve-bulk`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token || ''}`
-        },
-        body: JSON.stringify({ transaction_ids: transactionIdsToApprove })
-      });
-      fetchTransactions(activeFilter, true);
-      setSelectedIds(new Set());
-    } catch (err) {
-      showToast('Bulk approval failed', 'error');
-    } finally {
-      setIsApprovingBulk(false);
-    }
-  };
 
   const handleBulkApprove = async () => {
     if (selectedIds.size === 0) return;
@@ -1324,6 +1268,23 @@ const Transactions = () => {
   /**
    * Build the ordered review queue.
    *
+   * CATEGORISED rows (have a non-APPROVED transactions row):
+   *   1. Sort by attention_level HIGH→MEDIUM→LOW
+   *   2. Within same level, sort by txn_date ascending
+   *   3. Walk the sorted list; when a txn is first encountered, immediately
+   *      pull in all its remaining siblings (same group_id) so they
+   *      appear consecutively. The "stored index" (position in the primary
+   *      sorted list) is only advanced after the full sibling group is done.
+   *
+   * UNCATEGORISED rows (no transactions row at all):
+   *   1. Sort by txn_date ascending
+   *   2. Within the same date, group by group_id
+   *
+   * Categorised rows come before uncategorised rows in the final queue.
+   */
+  /**
+   * Build the ordered review queue.
+   *
    * ALL transactions visible in the current filter are included (including APPROVED),
    * so clicking any row opens it in the review modal for editing.
    * If there is an active row selection (selectedIds), only those rows are queued.
@@ -1450,38 +1411,6 @@ const Transactions = () => {
     }
   };
 
-  const handleBulkAssignAccountSelect = async (account) => {
-    if (selectedIds.size === 0) return;
-    setIsBulkAssigning(true);
-    setIsBulkAssignOpen(false);
-
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const res = await fetch(`${API_BASE_URL}/api/transactions/assign-approve-bulk`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token || ''}`
-        },
-        body: JSON.stringify({
-          uncategorized_transaction_ids: Array.from(selectedIds),
-          offset_account_id: account.account_id
-        })
-      });
-
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Failed to bulk assign');
-      
-      showToast(`Successfully assigned and approved ${json.approved_count} transactions`, 'success');
-      setSelectedIds(new Set());
-      fetchTransactions(activeFilter, true);
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setIsBulkAssigning(false);
-    }
-  };
-
   const closeReview = () => {
     setIsReviewOpen(false);
     setReviewPickerField(null);
@@ -1508,25 +1437,8 @@ const Transactions = () => {
   const saveReviewCorrection = async (txn, edits) => {
     const uncatId = txn.uncategorized_transaction_id;
     const body = {};
-    if (edits.amount !== undefined)           body.amount           = parseFloat(edits.amount);
+    if (edits.amount !== undefined)         body.amount           = edits.amount;
     if (edits.transaction_type !== undefined) body.transaction_type = edits.transaction_type;
-
-    // ── Always pair amount + transaction_type together ─────────────────────
-    // The backend derives debit/credit from BOTH fields together. If either is
-    // missing it falls back to existingTxn?.amount / existingTxn?.transaction_type,
-    // which are null/undefined for uncategorised rows (no transactions row yet),
-    // causing the saved value to become 0/null.
-    //
-    // Case A: amount edited, type toggle untouched → infer type from source row.
-    if (edits.amount !== undefined && edits.transaction_type === undefined) {
-      const srcIsDebit = (txn.debit ?? 0) > 0;
-      body.transaction_type = srcIsDebit ? 'DEBIT' : 'CREDIT';
-    }
-    // Case B: type toggle changed, amount field untouched → carry current amount.
-    if (edits.transaction_type !== undefined && edits.amount === undefined) {
-      const srcAmount = (txn.debit ?? 0) > 0 ? txn.debit : (txn.credit ?? 0);
-      body.amount = parseFloat(srcAmount) || 0;
-    }
     if (edits.details !== undefined)        body.details          = edits.details;
     if (edits.txn_date !== undefined)       body.txn_date         = edits.txn_date;
     if (edits.base_account_id !== undefined) body.base_account_id  = edits.base_account_id;
@@ -1572,31 +1484,24 @@ const Transactions = () => {
     return json; // contains { success, similarTransactions, suggestedAccount }
   };
 
-  /**
-   * Create a fresh transactions row for an uncategorised txn via manual-categorize.
-   * Returns the parsed JSON response from the server.
-   */
+  /** Fire the manual-categorize API for an uncategorised row — returns the parsed JSON response. */
   const manualCategorizeReviewTxn = async (uncatId, offsetAccountId) => {
     const { data: { session } } = await supabase.auth.getSession();
     const res = await fetch(`${API_BASE_URL}/api/transactions/manual-categorize`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${session?.access_token || ''}`
-      },
-      body: JSON.stringify({
-        uncategorized_transaction_id: uncatId,
-        offset_account_id: offsetAccountId
-      })
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token || ''}` },
+      body: JSON.stringify({ uncategorized_transaction_id: uncatId, offset_account_id: offsetAccountId })
     });
     const json = await res.json();
-    if (!res.ok) throw new Error(json.error || 'Manual categorize failed');
-    return json;
+    if (!res.ok) {
+      throw new Error(json.error || 'Categorize failed');
+    }
+    return json; // contains { success, similarTransactions, suggestedAccount }
   };
 
   /**
-   * Next handler — advance to the next card in the queue.
-   * Unsaved edits are discarded. Nothing is written to the DB.
+   * Skip handler — discard in-flight edits and move card to end of queue.
+   * Nothing is saved to the DB.
    */
   /**
    * Previous handler — go back one card without saving.
@@ -1612,37 +1517,29 @@ const Transactions = () => {
     if (!current) return;
     const uncatId = current.uncategorized_transaction_id;
 
-    // Discard any unsaved edits for this card
+    // Discard edits for this card so they don’t linger when it comes back
     setReviewEditState(prev => {
       const next = { ...prev };
       delete next[uncatId];
       return next;
     });
 
-    // Simply advance the cursor — queue order is preserved
-    if (reviewIndex < reviewQueue.length - 1) {
-      setReviewIndex(prev => prev + 1);
-    }
+    // Move card to end of queue
+    setReviewQueue(prev => {
+      const next = [...prev];
+      const [card] = next.splice(reviewIndex, 1);
+      next.push({ ...card, _siblingPrefill: undefined });
+      return next;
+    });
+
+    // Index stays at same position, which now points to the next card
+    setReviewIndex(prev => Math.min(prev, reviewQueue.length - 2));
     setReviewValidationMsg('');
   };
 
   /**
-   * Previous handler — go back one card without saving.
-   */
-  const handleReviewPrev = () => {
-    if (reviewIndex <= 0) return;
-    setReviewIndex(prev => prev - 1);
-    setReviewValidationMsg('');
-  };
-
-  /**
-   * Save handler — persist in-flight field edits to the DB, stay on the same card.
-   * NEVER approves a transaction.
-   *
-   *   - Structural fields (amount, type, details, date, base_account, note) → /correct
-   *   - offset_account_id on a CATEGORISED-PENDING row → /recategorize (no approval)
-   *   - offset_account_id on an UNCATEGORISED row → held in editState only;
-   *     Approve will call manual-categorize (create + approve) when the time comes.
+   * Save & Skip handler — persist any in-flight edits to the DB, then move
+   * the card to the end of the queue without approving it.
    */
   const handleReviewSaveAndSkip = async () => {
     const current = reviewQueue[reviewIndex];
@@ -1650,7 +1547,6 @@ const Transactions = () => {
     const uncatId = current.uncategorized_transaction_id;
     const edits = reviewEditState[uncatId] || {};
     const txnRow = current.transactions?.[0];
-    const isCategorised = !!txnRow;
 
     const CORRECTION_FIELDS = ['amount', 'transaction_type', 'details', 'txn_date', 'base_account_id', 'user_note'];
     const correctionEdits = Object.fromEntries(
@@ -1660,110 +1556,36 @@ const Transactions = () => {
     const noteOnly = hasCorrectionEdits &&
       Object.keys(correctionEdits).length === 1 &&
       correctionEdits.user_note !== undefined;
-    const offsetChanged = edits.offset_account_id !== undefined;
 
-    if (!hasCorrectionEdits && !offsetChanged) {
-      showToast('No changes to save', 'info');
-      return;
-    }
-    setReviewValidationMsg('');
-
-    // Fire network operations in background
-    (async () => {
-      try {
-      // 1. Structural field corrections → /correct (never approves)
+    setReviewApproving(true);
+    try {
       if (hasCorrectionEdits && !noteOnly) {
         await saveReviewCorrection(current, correctionEdits);
       } else if (hasCorrectionEdits && noteOnly && txnRow?.transaction_id) {
         await saveNoteOnly(txnRow.transaction_id, correctionEdits.user_note);
       }
+      // offset_account_id change alone is deferred to Approve — nothing to save here
+    } catch (err) {
+      showToast(err.message || 'Failed to save', 'error');
+      setReviewApproving(false);
+      return;
+    }
+    setReviewApproving(false);
 
-      // 2a. Category change on CATEGORISED-PENDING row → /recategorize (no approval)
-      if (offsetChanged && isCategorised && txnRow?.transaction_id) {
-        const { data: { session } } = await supabase.auth.getSession();
-        const recatRes = await fetch(
-          `${API_BASE_URL}/api/transactions/${txnRow.transaction_id}/recategorize`,
-          {
-            method: 'PATCH',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${session?.access_token || ''}`
-            },
-            body: JSON.stringify({ offset_account_id: edits.offset_account_id })
-          }
-        );
-        if (!recatRes.ok) {
-          const j = await recatRes.json();
-          throw new Error(j.error || 'Recategorize failed');
-        }
-      }
-
-      // 2b. Category assigned to an UNCATEGORISED row → create a PENDING transactions row.
-      //     manual-categorize with pending:true inserts as DRAFT/PENDING (no ledger, no cache).
-      //     Ledger entries + cache seeding are deferred to the Approve step.
-      if (offsetChanged && !isCategorised) {
-        const { data: { session } } = await supabase.auth.getSession();
-        const catRes = await fetch(`${API_BASE_URL}/api/transactions/manual-categorize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token || ''}` },
-          body: JSON.stringify({
-            uncategorized_transaction_id: uncatId,
-            offset_account_id: edits.offset_account_id,
-            pending: true
-          })
-        });
-        if (!catRes.ok) {
-          const j = await catRes.json();
-          throw new Error(j.error || 'Failed to save category');
-        }
-        const catJson = await catRes.json();
-
-        // Patch the local reviewQueue card to reflect the new PENDING row so
-        // the UI updates immediately (status badge, Approve button) without a
-        // full data refetch. We synthesize a minimal transactions row.
-        if (catJson.transaction_id) {
-          setReviewQueue(prev => prev.map((q) => {
-            if (q.uncategorized_transaction_id !== uncatId) return q;
-            return {
-              ...q,
-              transactions: [{
-                transaction_id: catJson.transaction_id,
-                review_status: 'PENDING',
-                posting_status: 'DRAFT',
-                offset_account_id: edits.offset_account_id,
-                accounts: { account_name: edits._offset_account_name ?? '' },
-                is_uncategorised: false,
-              }]
-            };
-          }));
-        }
-      }
-
-      // Clear all persisted fields from editState AFTER DB confirms save.
-      // This prevents the UI from momentarily flickering to unassigned while waiting.
-      setReviewEditState(prev => {
-        const next = { ...prev };
-        const remaining = { ...(next[uncatId] || {}) };
-        CORRECTION_FIELDS.forEach(k => delete remaining[k]);
-        if (offsetChanged) {
-          delete remaining.offset_account_id;
-          delete remaining._offset_account_name;
-          delete remaining._sibling_suggested;
-        }
-        if (Object.keys(remaining).length === 0) {
-          delete next[uncatId];
-        } else {
-          next[uncatId] = remaining;
-        }
-        return next;
-      });
-
-      showToast('Changes saved', 'success');
-
-      } catch (err) {
-        showToast(err.message || 'Failed to save', 'error');
-      }
-    })();
+    // Clear edits (they’re now persisted) and move card to end of queue
+    setReviewEditState(prev => {
+      const next = { ...prev };
+      delete next[uncatId];
+      return next;
+    });
+    setReviewQueue(prev => {
+      const next = [...prev];
+      const [card] = next.splice(reviewIndex, 1);
+      next.push({ ...card, _siblingPrefill: undefined });
+      return next;
+    });
+    setReviewIndex(prev => Math.min(prev, reviewQueue.length - 2));
+    setReviewValidationMsg('');
   };
 
   /**
@@ -1782,89 +1604,14 @@ const Transactions = () => {
     const offsetAccountName = edits._offset_account_name ??
       (isCategorised ? txnRow?.accounts?.account_name : null);
 
-    // If the transaction is already APPROVED, skip the approval step entirely.
-    // Only save any field corrections / note / category changes.
-    const isAlreadyApproved = isCategorised && txnRow?.review_status === 'APPROVED';
-    
-    // Calculate UI updates to advance instantly
-    const nextCard = reviewQueue[reviewIndex + 1];
-    const hasSiblingNext = !!(nextCard && nextCard.group_id && nextCard.group_id === current.group_id);
-
-    if (isAlreadyApproved) {
-      setReviewEditState(prev => { const n = { ...prev }; delete n[uncatId]; return n; });
-      if (reviewIndex < reviewQueue.length - 1) {
-        setReviewIndex(prev => prev + 1);
-      } else {
-        setReviewDone(true);
-        setTimeout(() => closeReview(), 1500);
-      }
-      
-      // Background save for already approved
-      (async () => {
-        try {
-        const CORR_FIELDS = ['amount', 'transaction_type', 'details', 'txn_date', 'base_account_id', 'user_note'];
-        const corrEdits = Object.fromEntries(Object.entries(edits).filter(([k]) => CORR_FIELDS.includes(k)));
-        if (Object.keys(corrEdits).length > 0) await saveReviewCorrection(current, corrEdits);
-        if (edits.user_note !== undefined && txnRow?.transaction_id) await saveNoteOnly(txnRow.transaction_id, edits.user_note);
-        if (edits.offset_account_id !== undefined && txnRow?.transaction_id) {
-          const { data: { session } } = await supabase.auth.getSession();
-          const r = await fetch(`${API_BASE_URL}/api/transactions/${txnRow.transaction_id}/recategorize`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token || ''}` },
-            body: JSON.stringify({ offset_account_id: edits.offset_account_id })
-          });
-          if (!r.ok) { const j = await r.json(); throw new Error(j.error || 'Recategorize failed'); }
-        }
-        } catch (err) {
-          showToast(err.message || 'Failed to save background corrections', 'error');
-        }
-      })();
-      return;
-    }
-
     if (!offsetAccountId) {
       setReviewValidationMsg('Please assign a category before approving');
       return;
     }
     setReviewValidationMsg('');
+    setReviewApproving(true);
 
-    // Instant UI advancement for approving
-    setReviewQueue(prev => {
-      const filtered = prev.filter((_, i) => i !== reviewIndex);
-      if (!hasSiblingNext) return filtered;
-      return filtered.map((q, i) => {
-        if (i !== reviewIndex) return q;
-        return { ...q, _siblingPrefill: { offset_account_id: offsetAccountId, account_name: offsetAccountName } };
-      });
-    });
-
-    if (reviewQueue.length - 1 === 0) {
-      setReviewDone(true);
-      setTimeout(() => closeReview(), 1500);
-    } else {
-      setReviewIndex(prev => Math.min(prev, reviewQueue.length - 2));
-      setReviewEditState(prev => {
-        const next = { ...prev };
-        delete next[uncatId];
-        if (hasSiblingNext) {
-          const nextUncatId = nextCard.uncategorized_transaction_id;
-          const existing = next[nextUncatId];
-          if (!existing?.offset_account_id || existing?._sibling_suggested) {
-            next[nextUncatId] = {
-              ...(existing || {}),
-              offset_account_id: offsetAccountId,
-              _offset_account_name: offsetAccountName,
-              _sibling_suggested: true
-            };
-          }
-        }
-        return next;
-      });
-    }
-
-    // Fire background network requests
-    (async () => {
-      try {
+    try {
       // ── Classify edits ─────────────────────────────────────────────────────
       // CORRECTION_FIELDS go to PATCH /correct and may trigger a clean-slate.
       // offset_account_id is NOT a correction field — it routes to recategorize
@@ -1951,13 +1698,73 @@ const Transactions = () => {
         approveResult = await approveReviewTxn(txnRow.transaction_id);
       }
 
-      // Similar transactions popup is intentionally disabled.
-      // (approveResult may still contain similarTransactions, but we no longer surface them.)
-
-      } catch (err) {
-        showToast(err.message || 'Failed to approve in background', 'error');
+      // Show similar transactions popup if the server found any
+      if (approveResult?.similarTransactions?.length > 0) {
+        setSimilarTxns(approveResult.similarTransactions);
+        setSimilarSuggestedAccount(approveResult.suggestedAccount);
+        setSimilarAccountOverrides({});
       }
-    })();
+
+      // ── Step 4+5: Pre-fill next sibling (if same group) then advance queue ───
+      //
+      // Only look at the IMMEDIATE next card. When the user approves that one,
+      // the same logic fires for the card after it — cascading naturally.
+      // Skip and Save & Skip never reach this path.
+      const nextCard = reviewQueue[reviewIndex + 1];
+      const hasSiblingNext = !!(nextCard
+        && nextCard.group_id
+        && nextCard.group_id === current.group_id);
+
+      console.log('[Review] Sibling pre-fill check:', {
+        approvedUncatId: uncatId,
+        approvedGroup: current.group_id,
+        nextCardGroup: nextCard?.group_id,
+        hasSiblingNext,
+        queueLength: reviewQueue.length,
+        reviewIndex
+      });
+      // Single queue update: remove approved card + optionally stamp sibling
+      setReviewQueue(prev => {
+        const filtered = prev.filter((_, i) => i !== reviewIndex);
+        if (!hasSiblingNext) return filtered;
+        // After removal the next card shifts to reviewIndex position
+        return filtered.map((q, i) => {
+          if (i !== reviewIndex) return q;
+          return { ...q, _siblingPrefill: { offset_account_id: offsetAccountId, account_name: offsetAccountName } };
+        });
+      });
+
+      if (reviewQueue.length - 1 === 0) {
+        setReviewDone(true);
+        setTimeout(() => closeReview(), 1500);
+      } else {
+        setReviewIndex(prev => Math.min(prev, reviewQueue.length - 2));
+        setReviewEditState(prev => {
+          const next = { ...prev };
+          // Clear the just-approved card's edits
+          delete next[uncatId];
+          // Pre-fill the next sibling's editState so approval works immediately
+          if (hasSiblingNext) {
+            const nextUncatId = nextCard.uncategorized_transaction_id;
+            const existing = next[nextUncatId];
+            // Don't overwrite if user already manually picked a non-suggested account
+            if (!existing?.offset_account_id || existing?._sibling_suggested) {
+              next[nextUncatId] = {
+                ...(existing || {}),
+                offset_account_id: offsetAccountId,
+                _offset_account_name: offsetAccountName,
+                _sibling_suggested: true
+              };
+            }
+          }
+          return next;
+        });
+      }
+    } catch (err) {
+      showToast(err.message || 'Failed to approve', 'error');
+    } finally {
+      setReviewApproving(false);
+    }
   };
 
   // ── Keyboard handler for the review popup ────────────────────────
@@ -1967,14 +1774,14 @@ const Transactions = () => {
       // Don’t intercept when user is typing in an input/textarea
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'Escape')     { e.preventDefault(); closeReview(); }
+      if (e.key === 'Escape') { e.preventDefault(); closeReview(); }
       if (e.key === ' ' || e.key === 'ArrowRight') { e.preventDefault(); handleReviewSkip(); }
       if (e.key === 'ArrowLeft')  { e.preventDefault(); handleReviewPrev(); }
-      if (e.key === 'Enter')      { e.preventDefault(); handleReviewApprove(); }
+      if (e.key === 'Enter') { e.preventDefault(); handleReviewApprove(); }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReviewOpen, reviewIndex, reviewQueue, reviewEditState]);
 
 
@@ -2044,29 +1851,6 @@ const Transactions = () => {
     })).filter((group) => group.transactions.length > 0);
   };
 
-  const getEligibleIdsInView = () => {
-    return filteredTransactions.filter(txn => {
-      const isCategorised = txn.transactions && txn.transactions.length > 0;
-      const status = isCategorised ? txn.transactions[0].review_status : 'Pending Categorisation';
-      return status !== 'APPROVED';
-    }).map(t => t.uncategorized_transaction_id);
-  };
-
-  const handleSelectAllFiltered = (e) => {
-    const eligibleIds = getEligibleIdsInView();
-    if (e.target.checked) {
-      const newSelected = new Set([...selectedIds, ...eligibleIds]);
-      setSelectedIds(newSelected);
-    } else {
-      const currentViewIds = new Set(eligibleIds);
-      const newSelected = new Set([...selectedIds].filter(id => !currentViewIds.has(id)));
-      setSelectedIds(newSelected);
-    }
-  };
-
-  const eligibleIdsInView = getEligibleIdsInView();
-  const isAllSelected = eligibleIdsInView.length > 0 && eligibleIdsInView.every(id => selectedIds.has(id));
-
   const toggleSelectAll = (level) => {
     const txnsInLevel = filteredTransactions.filter(
       (txn) => txn.transactions[0].attention_level === level
@@ -2100,7 +1884,6 @@ const Transactions = () => {
     // Use != null so that debit=0 is correctly treated as DEBIT (not credit)
     const isDebit = txn.debit != null;
     const amount = isDebit ? txn.debit : txn.credit;
-    const formattedAmount = Number(amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     if (correctingId === txn.uncategorized_transaction_id) {
       return (
@@ -2115,10 +1898,10 @@ const Transactions = () => {
     return (
       <div
         className={`amount-cell-clickable ${isDebit ? 'debit-cell' : 'credit-cell'}`}
-        title="Tap to edit amount or change transaction type"
+        title="Click to correct amount or type"
         onClick={() => setCorrectingId(txn.uncategorized_transaction_id)}
       >
-        {isDebit ? `- ₹${formattedAmount}` : `+ ₹${formattedAmount}`}
+        {isDebit ? `- ₹${amount}` : `+ ₹${amount}`}
         <span className="amount-edit-hint">✎</span>
       </div>
     );
@@ -2149,7 +1932,6 @@ const Transactions = () => {
             className="action-btn"
             onClick={() => { setManualAddForm(EMPTY_MANUAL_FORM); setManualAddError(''); setIsManualAddOpen(true); }}
             style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-            title="Manually add a transaction that isn't in any uploaded statement"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M12 5v14M5 12h14"/>
@@ -2166,23 +1948,9 @@ const Transactions = () => {
               className="action-btn review-btn"
               onClick={openReview}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-              title="Step through each uncategorised transaction one at a time to review and approve"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              Review {selectedIds.size > 0 ? `(${selectedIds.size})` : ''}
-            </button>
-          )}
-
-          {selectedIds.size > 0 && (
-            <button
-              className="action-btn primary-btn"
-              onClick={() => setIsBulkAssignOpen(true)}
-              disabled={isBulkAssigning}
-              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-              title={`Assign the same category to all ${selectedIds.size} selected transactions at once`}
-            >
-              {isBulkAssigning ? <span className="spinner-small" style={{ borderColor: 'white', borderTopColor: 'transparent' }} /> : <ICONS.Plus />}
-              Assign Account ({selectedIds.size})
+              Review
             </button>
           )}
           {activeFilter === 'PENDING_APP' ? (
@@ -2191,7 +1959,6 @@ const Transactions = () => {
               onClick={handleBulkApprove}
               disabled={selectedIds.size === 0 || isApprovingBulk}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-              title={selectedIds.size === 0 ? 'Select transactions above to approve them in bulk' : `Mark all ${selectedIds.size} selected transactions as approved`}
             >
               {isApprovingBulk ? <span className="spinner-small"></span> : <ICONS.Check />}
               {isApprovingBulk ? `Approving ${selectedIds.size}...` : `Approve Selected (${selectedIds.size})`}
@@ -2202,9 +1969,9 @@ const Transactions = () => {
               className={`action-btn ${isCategorizing ? 'categorising' : ''}`}
               onClick={handleCategorize}
               disabled={isCategorizing || processingDocIds.size > 0}
-              title={processingDocIds.size > 0
-                ? 'Please wait — your uploaded statements are still being processed'
-                : 'Automatically categorise all uncategorised transactions using AI'}
+              title={processingDocIds.size > 0 
+                ? "Wait for background processing to finish" 
+                : "Let AI categorize all remaining uncategorized items"}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
               {isCategorizing
@@ -2225,12 +1992,6 @@ const Transactions = () => {
         const isIndeterminate = processingDocIds.size > 0 && !pipelineStartedAt; // Phase 1
         const isDone = pipelineProgress >= 100;
         const docCount = processingDocIds.size;
-        
-        const processingNames = Array.from(processingDocIds)
-          .map(id => docNames[id])
-          .filter(Boolean)
-          .join(', ');
-
         return (
           <div className="pipeline-processing-banner">
             <div className="pipeline-banner-text">
@@ -2238,7 +1999,7 @@ const Transactions = () => {
               <span>
                 {isDone
                   ? 'Processing complete — transactions updated.'
-                  : `Processing ${processingNames || `${docCount} document${docCount > 1 ? 's' : ''}`}… transactions will update automatically.`}
+                  : `Processing ${docCount} document${docCount > 1 ? 's' : ''}… transactions will update automatically.`}
               </span>
               {/* Only show % once we have real progress (Phase 2+) */}
               {!isIndeterminate && pipelineProgress > 0 && (
@@ -2260,19 +2021,13 @@ const Transactions = () => {
       {failedDocIds.size > 0 && (() => {
         const isNeverStarted = pipelineErrorMsg === 'never_started';
         const isStale       = pipelineErrorMsg === 'stale';
-        
-        const failedNames = Array.from(failedDocIds)
-          .map(id => docNames[id])
-          .filter(Boolean)
-          .join(', ');
-
         return (
           <div className="pipeline-error-banner">
             <div className="pipeline-error-content">
               <span className="pipeline-error-icon">⚠</span>
               <div className="pipeline-error-text">
                 <span className="pipeline-error-title">
-                  {failedNames ? `${failedNames} failed to process.` : `${failedDocIds.size} document${failedDocIds.size > 1 ? 's' : ''} failed to process.`}
+                  {failedDocIds.size} document{failedDocIds.size > 1 ? 's' : ''} failed to process.
                 </span>
                 <span className="pipeline-error-subtitle">
                   {isNeverStarted
@@ -2540,15 +2295,8 @@ const Transactions = () => {
                 </div>
               ) : getGroupedTransactions() && getGroupedTransactions().length > 0 ? (
                 <>
-                  <div className="table-header uniform-layout">
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <input
-                        type="checkbox"
-                        className="row-checkbox"
-                        checked={isAllSelected}
-                        onChange={handleSelectAllFiltered}
-                      />
-                    </div>
+                  <div className="table-header grouped">
+                    <div></div>
                     <div
                       style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
                       onClick={() => setDateSortOrder(p => p === 'desc' ? 'asc' : 'desc')}
@@ -2556,10 +2304,10 @@ const Transactions = () => {
                       Date {dateSortOrder === 'desc' ? '↓' : '↑'}
                     </div>
                     <div>Details</div>
-                    <div style={{ textAlign: 'right', display: 'block', width: '100%' }}>Amount</div>
-                    <div>Account (Src → Dest)</div>
+                    <div>Amount</div>
+                    <div>Src Acc</div>
+                    <div>Dest Acc</div>
                     <div>Categorised By</div>
-                    <div>Status</div>
                   </div>
                   <div className="placeholder-rows">
                     {getGroupedTransactions().map((group) => (
@@ -2579,7 +2327,7 @@ const Transactions = () => {
                           </span>
                         </div>
                         {group.transactions.map((txn) => {
-                          const isChecked = selectedIds.has(txn.uncategorized_transaction_id);
+                          const isChecked = selectedIds.has(txn.transactions[0].transaction_id);
                           const accountName = txn.transactions[0].accounts
                             ? txn.transactions[0].accounts.account_name
                             : '-';
@@ -2589,54 +2337,45 @@ const Transactions = () => {
                           return (
                             <div
                               key={txn.uncategorized_transaction_id}
-                              className={`table-row uniform-layout ${txn.debit != null ? 'row-debit' : 'row-credit'} ${isApprovingBulk && selectedIds.has(txn.uncategorized_transaction_id) ? 'row-approving' : ''}`}
+                              className={`table-row grouped ${isApprovingBulk && selectedIds.has(txn.transactions[0].transaction_id) ? 'row-approving' : ''}`}
                             >
-                              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                 <input
                                   type="checkbox"
                                   className="row-checkbox"
                                   checked={isChecked}
-                                  disabled={txn.transactions?.[0]?.review_status === 'APPROVED'}
+                                  disabled={isUncategorised}
                                   onChange={() => {
                                     const newSelected = new Set(selectedIds);
                                     if (isChecked) {
-                                      newSelected.delete(txn.uncategorized_transaction_id);
+                                      newSelected.delete(txn.transactions[0].transaction_id);
                                     } else {
-                                      newSelected.add(txn.uncategorized_transaction_id);
+                                      newSelected.add(txn.transactions[0].transaction_id);
                                     }
                                     setSelectedIds(newSelected);
                                   }}
                                 />
                               </div>
-                              <div>{formatDate(txn.txn_date)}</div>
-                              <div className="details-cell raw-details" title={txn.details}>{txn.details}</div>
-                              <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
-                                {renderAmountCell(txn)}
+                              <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
+                              <div className="details-cell">{txn.details}</div>
+                              {renderAmountCell(txn)}
+                              <div
+                                className="account-cell-clickable"
+                                onClick={() => setSrcAccTarget(txn)}
+                                style={{ cursor: 'pointer' }}
+                                title="Click to change base account"
+                              >
+                                {txn.source_account?.account_name || '-'}
                               </div>
-                              <div className="account-directional-cell">
-                                <span className="account-src" onClick={() => setSrcAccTarget(txn)} title="Click to change the source bank or card account for this transaction">
-                                  {txn.source_account?.account_name || '-'}
-                                </span>
-                                <span className="account-arrow">→</span>
-                                <span 
-                                  className={`account-dest ${txn.transactions[0].accounts ? 'account-cell-clickable' : ''}`}
-                                  onClick={() => { if (txn.transactions[0].accounts) setRecatTarget(txn); }}
-                                  title="Click to assign a category to this transaction"
-                                >
-                                  {accountName}
-                                </span>
+                              <div
+                                className={txn.transactions[0].accounts ? 'account-cell-clickable' : ''}
+                                onClick={() => { if (txn.transactions[0].accounts) setRecatTarget(txn); }}
+                                style={{ cursor: txn.transactions[0].accounts ? 'pointer' : 'default' }}
+                              >
+                                {accountName}
                               </div>
                               <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                                 {categorisedBy}
-                              </div>
-                              <div>
-                                <span className="status-badge warning" style={{ display: 'inline-flex' }}>Pending Approval</span>
-                              </div>
-                              
-                              <div className="slide-approve-wrapper">
-                                <button className="slide-approve-btn" onClick={() => handleApprove(txn.transactions[0].transaction_id, isUncategorised, txn.uncategorized_transaction_id)} title="Mark as approved and move to your ledger">
-                                  <ICONS.Check />
-                                </button>
                               </div>
                             </div>
                           );
@@ -2656,22 +2395,16 @@ const Transactions = () => {
             </>
           ) : (
             <>
-              <div 
-                className="table-header uniform-layout"
+              <div
+                className="table-header"
                 style={{
-                  gridTemplateColumns: activeFilter === 'PENDING_CAT' || activeFilter === 'APPROVED' 
-                    ? '30px 90px 1fr 110px 220px 130px'
-                    : undefined
+                  gridTemplateColumns: activeFilter === 'PENDING_CAT'
+                    ? '110px 1fr 110px 130px 150px 160px'
+                    : activeFilter === 'APPROVED'
+                    ? '110px 1fr 110px 130px 150px 140px'
+                    : '110px 1fr 110px 130px 150px 140px 160px 40px'
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <input
-                    type="checkbox"
-                    className="row-checkbox"
-                    checked={isAllSelected}
-                    onChange={handleSelectAllFiltered}
-                  />
-                </div>
                 <div
                   style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
                   onClick={() => setDateSortOrder(p => p === 'desc' ? 'asc' : 'desc')}
@@ -2679,10 +2412,12 @@ const Transactions = () => {
                   Date {dateSortOrder === 'desc' ? '↓' : '↑'}
                 </div>
                 <div>Details</div>
-                <div style={{ textAlign: 'right', display: 'block', width: '100%' }}>Amount</div>
-                <div>Account (Src → Dest)</div>
-                <div>Categorised By</div>
-                {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && <div>Status</div>}
+                <div>Amount</div>
+                <div>Src Acc</div>
+                <div>Dest Acc</div>
+                {activeFilter !== 'PENDING_CAT' && <div>Categorised By</div>}
+                {activeFilter !== 'APPROVED' && <div>Status</div>}
+                {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && <div>Actions</div>}
               </div>
               <div id="transactions-table" className="placeholder-rows">
                 {loading ? (
@@ -2721,104 +2456,103 @@ const Transactions = () => {
                     return (
                       <div
                         key={txn.uncategorized_transaction_id}
-                        className={`table-row uniform-layout ${txn.debit != null ? 'row-debit' : 'row-credit'} ${isApprovingBulk && selectedIds.has(transactionId) ? 'row-approving' : ''}`}
-                        onClick={(e) => {
-                          if (e.target.closest('button') || e.target.closest('.account-cell-clickable') || e.target.closest('.account-src') || e.target.closest('.account-dest') || e.target.closest('.amount-editor') || e.target.closest('input[type="checkbox"]')) {
-                            return;
-                          }
-                          openReview(txn.uncategorized_transaction_id);
-                        }}
-                        style={{ 
-                          cursor: 'pointer',
-                          gridTemplateColumns: activeFilter === 'PENDING_CAT' || activeFilter === 'APPROVED' 
-                            ? '30px 90px 1fr 110px 220px 130px'
-                            : undefined
+                        className={`table-row ${isApprovingBulk && selectedIds.has(transactionId) ? 'row-approving' : ''}`}
+                        style={{
+                          gridTemplateColumns: activeFilter === 'PENDING_CAT'
+                            ? '110px 1fr 110px 130px 150px 160px'
+                            : activeFilter === 'APPROVED'
+                            ? '110px 1fr 110px 130px 150px 140px'
+                            : '110px 1fr 110px 130px 150px 140px 160px 40px'
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
-                          <input
-                            type="checkbox"
-                            className="row-checkbox"
-                            checked={selectedIds.has(txn.uncategorized_transaction_id)}
-                            disabled={status === 'APPROVED'}
-                            onChange={() => {
-                              const newSelected = new Set(selectedIds);
-                              if (selectedIds.has(txn.uncategorized_transaction_id)) {
-                                newSelected.delete(txn.uncategorized_transaction_id);
-                              } else {
-                                newSelected.add(txn.uncategorized_transaction_id);
-                              }
-                              setSelectedIds(newSelected);
-                            }}
-                          />
+                        <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
+                        <div className="details-cell">{txn.details}</div>
+                        {renderAmountCell(txn)}
+                        <div
+                          className="account-cell-clickable"
+                          onClick={() => setSrcAccTarget(txn)}
+                          style={{ cursor: 'pointer' }}
+                          title="Click to change base account"
+                        >
+                          {txn.source_account?.account_name || '-'}
                         </div>
-                        <div>{formatDate(txn.txn_date)}</div>
-                        <div className="details-cell raw-details" title={txn.details ? `Full description: ${txn.details}` : ''}>{txn.details}</div>
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
-                          {renderAmountCell(txn)}
-                        </div>
-                        <div className="account-directional-cell">
-                          <span className="account-src" onClick={() => setSrcAccTarget(txn)} title="Click to change the source bank or card account for this transaction">
-                            {txn.source_account?.account_name || '-'}
-                          </span>
-                          <span className="account-arrow">→</span>
-                          <span
-                            className={
-                              `account-dest ${
-                                isCategorised && txn.transactions[0].accounts
-                                  ? 'account-cell-clickable'
-                                  : isCategorised === false
-                                  ? 'account-cell-clickable uncategorised'
-                                  : ''
-                              }${isRowProcessing(txn) ? ' is-processing' : ''}${isRowFailed(txn) ? ' is-pipeline-failed' : ''}`
+                        <div
+                          className={
+                            `${
+                              isCategorised && txn.transactions[0].accounts
+                                ? 'account-cell-clickable'
+                                : isCategorised === false
+                                ? 'account-cell-clickable uncategorised'
+                                : ''
+                            }${isRowProcessing(txn) ? ' is-processing' : ''}${isRowFailed(txn) ? ' is-pipeline-failed' : ''}`
+                          }
+                          onClick={() => {
+                            if (isRowProcessing(txn) || isRowFailed(txn)) return;
+                            if (isCategorised && txn.transactions[0].accounts) {
+                              setRecatTarget(txn);
+                            } else if (!isCategorised) {
+                              setManualTarget(txn);
                             }
-                            onClick={() => {
-                              if (isRowProcessing(txn) || isRowFailed(txn)) return;
-                              if (isCategorised && txn.transactions[0].accounts) {
-                                setRecatTarget(txn);
-                              } else if (!isCategorised) {
-                                setManualTarget(txn);
-                              }
-                            }}
-                            style={{
-                              cursor:
-                                isRowProcessing(txn) || isRowFailed(txn)
-                                  ? 'default'
-                                  : (isCategorised && txn.transactions[0].accounts) || !isCategorised
-                                  ? 'pointer'
-                                  : 'default'
-                            }}
-                            title={isRowProcessing(txn) ? 'AI is categorising this transaction — it will update shortly' : isRowFailed(txn) ? 'Categorisation failed — use the Retry button above to try again' : 'Click to assign or change the category for this transaction'}
-                          >
-                            {isRowProcessing(txn)
-                              ? '🔒 Processing…'
-                              : isRowFailed(txn)
-                              ? '⚠ Failed'
-                              : isCategorised ? accountName : '+ Assign'
-                            }
-                          </span>
+                          }}
+                          style={{
+                            cursor:
+                              isRowProcessing(txn) || isRowFailed(txn)
+                                ? 'default'
+                                : (isCategorised && txn.transactions[0].accounts) || !isCategorised
+                                ? 'pointer'
+                                : 'default'
+                          }}
+                          title={isRowProcessing(txn) ? 'Auto-categorising…' : isRowFailed(txn) ? 'Pipeline failed — click Retry' : undefined}
+                        >
+                          {isRowProcessing(txn)
+                            ? <span className="processing-label">🔒 Processing…</span>
+                            : isRowFailed(txn)
+                            ? <span className="processing-label">⚠ Failed</span>
+                            : isCategorised ? accountName : '+ Assign'
+                          }
                         </div>
-                        <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                          {categorisedBy}
-                        </div>
-                        {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && (
+                        {activeFilter !== 'PENDING_CAT' && (
+                          <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                            {categorisedBy}
+                          </div>
+                        )}
+                        {activeFilter !== 'APPROVED' && (
                           <div>
                             <span className={`status-badge ${status.toLowerCase().replace(' ', '-')}`}>
                               {status === 'PENDING' ? 'Pending Approval' : status}
                             </span>
                           </div>
                         )}
-                        
-                        {status === 'PENDING' && isCategorised && !isRowProcessing(txn) && !isRowFailed(txn) && (
-                          <div className="slide-approve-wrapper">
-                            <button
-                              className="slide-approve-btn"
-                              onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
-                              disabled={isApproving}
-                              title="Mark as approved and move to your ledger"
-                            >
-                              {isApproving ? <span className="spinner-small" style={{ borderColor: 'white', borderTopColor: 'transparent' }}></span> : <ICONS.Check />} 
-                            </button>
+                        {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && (
+                          <div className="actions-cell">
+                            {isRowProcessing(txn) ? (
+                              <span className="processing-label" style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                🔒
+                              </span>
+                            ) : isRowFailed(txn) ? (
+                              <span
+                                className="processing-label"
+                                style={{ fontSize: '12px', color: '#F59E0B' }}
+                                title="Pipeline failed — click Retry above"
+                              >
+                                ⚠
+                              </span>
+                            ) : status === 'PENDING' && isCategorised ? (
+                              <button
+                                className="action-icon-btn approve"
+                                onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
+                                title="Approve"
+                                disabled={isApproving}
+                              >
+                                {isApproving ? (
+                                  <span className="spinner-small"></span>
+                                ) : (
+                                  <ICONS.Check />
+                                )}
+                              </button>
+                            ) : (
+                              <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>—</span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2831,7 +2565,110 @@ const Transactions = () => {
         </div>
       </div>
 
-      {/* Similar-transactions popup intentionally removed. */}
+      {similarTxns.length > 0 && (
+        <div className="modal-overlay" style={{ zIndex: 1200 }} onClick={() => setSimilarTxns([])}>
+          <div className="similar-txns-modal" onClick={e => e.stopPropagation()}>
+
+            <div className="modal-header">
+              <div>
+                <h2>Similar Transactions Found</h2>
+                <p className="similar-subtitle">
+                  {similarTxns.length} similar pending transaction{similarTxns.length > 1 ? 's' : ''} —
+                  suggested account: <strong>{similarSuggestedAccount?.account_name}</strong>
+                </p>
+              </div>
+              <button
+                className="modal-close-btn"
+                onClick={() => setSimilarTxns([])}
+                style={{ background: 'none', border: 'none', fontSize: '20px',
+                         cursor: 'pointer', color: 'var(--text-secondary)' }}
+              >✕</button>
+            </div>
+
+            <div className="similar-txns-list">
+              {similarTxns.map(txn => {
+                // Use uncategorized_transaction_id as fallback for pre-pipeline txns
+                // where transaction_id is null (avoids duplicate-key React warning)
+                const rowKey = txn.transaction_id ?? txn.uncategorized_transaction_id;
+                const assignedAccount = similarAccountOverrides[rowKey] || similarSuggestedAccount;
+                return (
+                  <div key={rowKey} className="similar-txn-row">
+                    <div className="similar-txn-date">
+                      {new Date(txn.transaction_date).toLocaleDateString('en-IN',
+                        { year: 'numeric', month: 'short', day: '2-digit' })}
+                    </div>
+                    <div className="similar-txn-details" title={txn.details}>
+                      {txn.details}
+                    </div>
+                    <div className="similar-txn-amount">
+                      {txn.transaction_type === 'DEBIT' ? '−' : '+'}
+                      ₹{(txn.amount || 0).toLocaleString('en-IN')}
+                    </div>
+                    <div className="similar-txn-from">
+                      <span className="similar-from-label" title={txn.current_account?.account_name}>
+                        {txn.current_account?.account_name || '—'}
+                      </span>
+                      <span className="similar-arrow">→</span>
+                      <button
+                        className="similar-account-btn"
+                        onClick={() => setSimilarPickerTarget(rowKey)}
+                      >
+                        {assignedAccount?.account_name}
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" strokeWidth="2.5">
+                          <path d="M6 9l6 6 6-6"/>
+                        </svg>
+                      </button>
+                    </div>
+                    <button
+                      className="action-icon-btn approve"
+                      title="Approve this one"
+                      onClick={() => handleSimilarIndividualApprove(txn)}
+                    >
+                      <ICONS.Check />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="similar-txns-footer">
+              <button className="action-btn" onClick={() => setSimilarTxns([])}>
+                Dismiss
+              </button>
+              <button
+                className="action-btn approve-selected has-selection"
+                onClick={handleSimilarBulkConfirm}
+                disabled={isApprovingSimilar}
+              >
+                {isApprovingSimilar
+                  ? <><span className="spinner-small"></span> Confirming...</>
+                  : <><ICONS.Check /> Confirm All ({similarTxns.length})</>
+                }
+              </button>
+            </div>
+
+          </div>
+
+          {similarPickerTarget && (
+            <AccountPickerModal
+              onClose={() => setSimilarPickerTarget(null)}
+              currentAccountId={
+                (similarAccountOverrides[similarPickerTarget] || similarSuggestedAccount)?.account_id
+              }
+              preloadedAccounts={cachedAccounts}
+              onAccountCreated={handleAccountCreated}
+              onSelect={(account) => {
+                setSimilarAccountOverrides(prev => ({
+                  ...prev,
+                  [similarPickerTarget]: account
+                }));
+                setSimilarPickerTarget(null);
+              }}
+            />
+          )}
+        </div>
+      )}
 
 
       {recatTarget && (
@@ -2863,7 +2700,7 @@ const Transactions = () => {
           onAccountCreated={handleAccountCreated}
         />
       )}
-      <Toast toasts={toasts} exiting={exiting} onDismiss={dismissToast} />
+      <Toast toasts={toasts} />
 
       {/* ── Manual Review Popup ── */}
       {isReviewOpen && (
@@ -2889,14 +2726,11 @@ const Transactions = () => {
               // Resolved display values
               const displayDate  = edits.txn_date    ?? current.txn_date?.split('T')[0] ?? '';
               const displayDetails = edits.details   ?? current.details ?? '';
-              // Use > 0 so debit=0 (credit txn) is correctly treated as CREDIT, not DEBIT
+              // Use != null so debit=0 is treated as DEBIT, not credit
               const isDebit = edits.transaction_type
                 ? edits.transaction_type === 'DEBIT'
-                : (current.debit ?? 0) > 0;
-              let displayAmount = edits.amount ?? ((current.debit ?? 0) > 0 ? current.debit : (current.credit ?? 0));
-              if (typeof displayAmount === 'number') {
-                displayAmount = displayAmount.toFixed(2);
-              }
+                : current.debit != null;
+              const displayAmount = edits.amount ?? (current.debit != null ? current.debit : (current.credit ?? 0));
               const displaySrcAcc = edits._src_account_name ?? current.source_account?.account_name ?? '-';
               const displayDestAcc = edits._offset_account_name ?? (isCategorised ? txnRow?.accounts?.account_name : null);
               const displayNote = edits.user_note    ?? txnRow?.user_note ?? '';
@@ -3189,104 +3023,88 @@ const Transactions = () => {
           <div className="review-card" onClick={e => e.stopPropagation()}>
 
             {/* Header */}
-            <div className="review-header" style={{ alignItems: 'center' }}>
+            <div className="review-header">
               <div>
                 <h2 className="review-title">Add Transaction</h2>
                 <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Saved directly as approved</span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <input
-                  type="date"
-                  className="review-input"
-                  value={manualAddForm.txn_date}
-                  onChange={e => setManualAddForm(f => ({ ...f, txn_date: e.target.value }))}
-                  style={{ padding: '6px 10px', fontSize: '13px', width: 'auto', margin: 0 }}
-                />
-                <button className="review-close-btn" onClick={() => setIsManualAddOpen(false)} title="Cancel and close">✕</button>
-              </div>
+              <button className="review-close-btn" onClick={() => setIsManualAddOpen(false)} title="Close">✕</button>
             </div>
 
             {/* Body */}
             <div className="review-body">
 
+              {/* Date */}
+              <div className="review-field">
+                <label className="review-field-label">Date</label>
+                <input
+                  type="date"
+                  className="review-input"
+                  value={manualAddForm.txn_date}
+                  onChange={e => setManualAddForm(f => ({ ...f, txn_date: e.target.value }))}
+                />
+              </div>
+
               {/* Details */}
               <div className="review-field">
                 <label className="review-field-label">Details</label>
-                <textarea
+                <input
+                  type="text"
                   className="review-input"
                   value={manualAddForm.details}
                   onChange={e => setManualAddForm(f => ({ ...f, details: e.target.value }))}
                   placeholder="Transaction description"
-                  rows={3}
-                  style={{ resize: 'vertical', minHeight: '60px', fontFamily: 'inherit' }}
                 />
               </div>
 
-              {/* Amount & Accounts Row */}
-              <div style={{ display: 'flex', gap: '16px', alignItems: 'stretch' }}>
-                {/* Left Side: Amount */}
-                <div style={{ flex: '0 0 140px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  <div className="review-field" style={{ flex: 1 }}>
-                    <label className="review-field-label">Amount</label>
-                    <input
-                      type="number"
-                      className="review-input review-amount-input"
-                      step="0.01"
-                      min="0.01"
-                      value={manualAddForm.amount}
-                      onChange={e => setManualAddForm(f => ({ ...f, amount: e.target.value }))}
-                      onBlur={(e) => {
-                        if (e.target.value) {
-                          setManualAddForm(f => ({ ...f, amount: Number(e.target.value).toFixed(2) }));
-                        }
-                      }}
-                      placeholder="0.00"
-                      style={{ flex: 1, fontSize: '18px', fontWeight: 'bold' }}
-                    />
-                  </div>
-                  <div className="review-field" style={{ flex: 1, justifyContent: 'flex-end' }}>
-                    <label className="review-field-label" style={{ visibility: 'hidden' }}>Type</label>
-                    <div className="review-type-toggle" style={{ flex: 1 }}>
-                      <button
-                        className={`type-btn ${manualAddForm.transaction_type === 'DEBIT' ? 'active debit' : ''}`}
-                        onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'DEBIT' }))}
-                      >− Dr</button>
-                      <button
-                        className={`type-btn ${manualAddForm.transaction_type === 'CREDIT' ? 'active credit' : ''}`}
-                        onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'CREDIT' }))}
-                      >+ Cr</button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Right Side: Accounts */}
-                <div style={{ flex: '1', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  {/* Source Account */}
-                  <div className="review-field" style={{ flex: 1 }}>
-                    <label className="review-field-label">Source Account</label>
+              {/* Amount */}
+              <div className="review-field">
+                <label className="review-field-label">Amount</label>
+                <div className="review-amount-row">
+                  <div className="review-type-toggle">
                     <button
-                      className={`review-account-btn ${!manualAddForm._src_account_name ? 'review-assign' : ''}`}
-                      onClick={() => setManualAddPicker('src')}
-                      style={{ flex: 1 }}
-                    >
-                      {manualAddForm._src_account_name || '+ Select bank / CC account'}
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                    </button>
-                  </div>
-
-                  {/* Dest Account */}
-                  <div className="review-field" style={{ flex: 1 }}>
-                    <label className="review-field-label">Category / Dest Account</label>
+                      className={`type-btn ${manualAddForm.transaction_type === 'DEBIT' ? 'active debit' : ''}`}
+                      onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'DEBIT' }))}
+                    >− Dr</button>
                     <button
-                      className={`review-account-btn ${!manualAddForm._offset_account_name ? 'review-assign' : ''}`}
-                      onClick={() => setManualAddPicker('dest')}
-                      style={{ flex: 1 }}
-                    >
-                      {manualAddForm._offset_account_name || '+ Assign category'}
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
-                    </button>
+                      className={`type-btn ${manualAddForm.transaction_type === 'CREDIT' ? 'active credit' : ''}`}
+                      onClick={() => setManualAddForm(f => ({ ...f, transaction_type: 'CREDIT' }))}
+                    >+ Cr</button>
                   </div>
+                  <input
+                    type="number"
+                    className="review-input"
+                    step="0.01"
+                    min="0.01"
+                    value={manualAddForm.amount}
+                    onChange={e => setManualAddForm(f => ({ ...f, amount: e.target.value }))}
+                    placeholder="0.00"
+                  />
                 </div>
+              </div>
+
+              {/* Source Account */}
+              <div className="review-field">
+                <label className="review-field-label">Source Account</label>
+                <button
+                  className={`review-account-btn ${!manualAddForm._src_account_name ? 'review-assign' : ''}`}
+                  onClick={() => setManualAddPicker('src')}
+                >
+                  {manualAddForm._src_account_name || '+ Select bank / CC account'}
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+              </div>
+
+              {/* Dest Account */}
+              <div className="review-field">
+                <label className="review-field-label">Category / Dest Account</label>
+                <button
+                  className={`review-account-btn ${!manualAddForm._offset_account_name ? 'review-assign' : ''}`}
+                  onClick={() => setManualAddPicker('dest')}
+                >
+                  {manualAddForm._offset_account_name || '+ Assign category'}
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
               </div>
 
               {/* Note */}
@@ -3361,17 +3179,6 @@ const Transactions = () => {
               }}
             />
           )}
-        </div>
-      )}
-
-      {isBulkAssignOpen && (
-        <div style={{ position: 'fixed', zIndex: 1300 }}>
-          <AccountPickerModal
-            onClose={() => setIsBulkAssignOpen(false)}
-            preloadedAccounts={cachedAccounts}
-            onAccountCreated={handleAccountCreated}
-            onSelect={handleBulkAssignAccountSelect}
-          />
         </div>
       )}
     </div>

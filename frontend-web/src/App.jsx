@@ -13,8 +13,10 @@ import Overview from './components/pages/Overview';
 import Transactions from './components/pages/Transactions';
 import Accounts from './components/pages/Accounts';
 import Analytics from './components/pages/Analytics';
+import Profile from './components/pages/Profile';
 import CategoryTransactions from './components/pages/CategoryTransactions';
 import WelcomeScreen from './components/WelcomeScreen';
+import Settings from './components/pages/Settings';
 import SetupAccounts from './components/SetupAccounts';
 import QCPanel from './components/QCPanel';
 
@@ -271,6 +273,8 @@ function App() {
              <Route path="category/:categoryName" element={<CategoryTransactions />} />
              <Route path="accounts" element={<Accounts />} />
              <Route path="analytics" element={<Analytics />} />
+             <Route path="profile" element={<Profile />} />
+             <Route path="settings" element={<Settings toggleTheme={toggleTheme} isDarkMode={isDarkMode} />} />
              <Route path="review" element={<ReviewPage />} />
         </Route>
 
