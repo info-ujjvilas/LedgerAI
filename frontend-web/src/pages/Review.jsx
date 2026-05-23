@@ -237,7 +237,6 @@ export default function ReviewPage() {
 
     useEffect(() => {
         setEditingCell(null);
-        setCurrentPage(1);
     }, [activeParser]);
 
     // Fetch PDF map (rubber-binding bboxes) — runs once after documentId is known
@@ -246,8 +245,14 @@ export default function ReviewPage() {
         setPdfLoading(true);
         API.get(`/documents/${documentId}/pdf-map`)
             .then(res => {
-                setPdfMapData(res.data.transactions || []);
+                const txns = res.data.transactions || [];
+                setPdfMapData(txns);
                 setPdfPageCount(res.data.page_count || 0);
+                
+                // Auto-jump to the first page that actually contains transactions
+                if (txns.length > 0 && txns[0].page && txns[0].page > 1) {
+                    setCurrentPage(prev => (prev === 1 ? txns[0].page : prev));
+                }
             })
             .catch(err => console.error('PDF map load error:', err))
             .finally(() => setPdfLoading(false));
