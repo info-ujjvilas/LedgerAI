@@ -4,6 +4,7 @@
   border-right: 1px solid var(--glass-border);
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   color: var(--text-primary);
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   position: sticky;
@@ -63,7 +64,7 @@
 }
 
 .sidebar-container.expanded {
-  width: 240px;
+  width: 185px;
 }
 
 /* Sidebar Header */

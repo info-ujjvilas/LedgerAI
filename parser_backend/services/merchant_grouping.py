@@ -290,19 +290,18 @@ def _finish(sb, doc_id, txns, user_id):
     
     sb.table("documents").update({"grouping_status": "pipeline_running", "updated_at": "now()"}).eq("document_id", doc_id).execute()
     
-    time.sleep(1) # Reduced from 2s
-    
     node_url = os.environ.get("NODE_BACKEND_URL", "http://127.0.0.1:3000")
     secret = os.environ.get("INTERNAL_SECRET", "")
     if secret:
-        logger.info("Triggering Node.js auto-pipeline for doc %s...", doc_id)
+        logger.info("Triggering Node.js auto-pipeline for doc %s with %d transaction IDs...", doc_id, len(ids))
         try:
             with httpx.Client() as client:
                 client.post(
                     f"{node_url}/internal/auto-pipeline", 
-                    json={"document_id": doc_id, "user_id": user_id}, 
+                    json={"document_id": doc_id, "user_id": user_id, "transaction_ids": ids}, 
                     headers={"Authorization": f"Bearer {secret}"}, 
                     timeout=120.0
                 )
         except Exception as e:
             logger.error("Failed to trigger Node.js pipeline: %s", e)
+

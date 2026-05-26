@@ -125,10 +125,10 @@ async function runAutoPipeline(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { document_id, user_id } = req.body || {};
+  const { document_id, user_id, transaction_ids } = req.body || {};
   if (!document_id || !user_id) return res.status(400).json({ error: 'document_id and user_id are required' });
 
-  logger.info('[AUTO-PIPELINE] START', { document_id, user_id });
+  logger.info('[AUTO-PIPELINE] START', { document_id, user_id, supplied_ids: transaction_ids?.length ?? 'none' });
 
   await supabase.from('documents').update({
     grouping_status: 'pipeline_running',
@@ -140,21 +140,54 @@ async function runAutoPipeline(req, res) {
   let pipelineError = null;
   try {
     // 1. Fetch pending transactions
-    const { data: existingTxns } = await supabase
-      .from('transactions')
-      .select('uncategorized_transaction_id')
-      .eq('document_id', document_id);
+    let pending;
 
-    // Filter out nulls to prevent 'IN (..., null, ...)' query issues in Postgres
-    const existingIds = (existingTxns || [])
-      .map(r => r.uncategorized_transaction_id)
-      .filter(id => id !== null);
+    if (Array.isArray(transaction_ids) && transaction_ids.length > 0) {
+      // Fast path: Python told us exactly which IDs to process — no race condition.
+      // Fetch the full rows directly without relying on grouping_status being committed.
+      logger.info('[AUTO-PIPELINE] Using supplied transaction_ids — skipping grouping_status fetch', { count: transaction_ids.length });
 
-    let uncatQuery = supabase.from('uncategorized_transactions').select('*').eq('document_id', document_id).eq('user_id', user_id);
-    if (existingIds.length > 0) uncatQuery = uncatQuery.not('uncategorized_transaction_id', 'in', `(${existingIds.join(',')})`);
+      // Exclude any IDs already in the transactions table (may have been processed by a duplicate trigger)
+      const { data: existingTxns } = await supabase
+        .from('transactions')
+        .select('uncategorized_transaction_id')
+        .in('uncategorized_transaction_id', transaction_ids);
 
-    const { data: uncatRows } = await uncatQuery.in('grouping_status', ['done', 'pipeline_running']);
-    const pending = uncatRows || [];
+      const existingSet = new Set(
+        (existingTxns || []).map(r => r.uncategorized_transaction_id).filter(id => id !== null)
+      );
+      const freshIds = transaction_ids.filter(id => !existingSet.has(id));
+
+      if (freshIds.length === 0) {
+        return res.json({ resolved: 0, llm_pending: 0, document_id });
+      }
+
+      const { data: suppliedRows } = await supabase
+        .from('uncategorized_transactions')
+        .select('*')
+        .in('uncategorized_transaction_id', freshIds);
+
+      pending = suppliedRows || [];
+    } else {
+      // Fallback path: no IDs supplied — use the original grouping_status-based fetch.
+      logger.info('[AUTO-PIPELINE] No transaction_ids supplied — falling back to grouping_status fetch');
+
+      const { data: existingTxns } = await supabase
+        .from('transactions')
+        .select('uncategorized_transaction_id')
+        .eq('document_id', document_id);
+
+      const existingIds = (existingTxns || [])
+        .map(r => r.uncategorized_transaction_id)
+        .filter(id => id !== null);
+
+      let uncatQuery = supabase.from('uncategorized_transactions').select('*').eq('document_id', document_id).eq('user_id', user_id);
+      if (existingIds.length > 0) uncatQuery = uncatQuery.not('uncategorized_transaction_id', 'in', `(${existingIds.join(',')})`);
+
+      const { data: uncatRows } = await uncatQuery.in('grouping_status', ['done', 'pipeline_running']);
+      pending = uncatRows || [];
+    }
+
     if (pending.length === 0) return res.json({ resolved: 0, llm_pending: 0, document_id });
 
     // ── STAGE 0: Contra Radar ──────────────────────────────────────────────────
