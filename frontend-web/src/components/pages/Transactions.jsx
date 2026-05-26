@@ -218,6 +218,11 @@ const Transactions = () => {
   const [pipelineProgress, setPipelineProgress] = useState(0);      // 0-100
   const [pipelineErrorMsg, setPipelineErrorMsg] = useState('');     // contextual error hint
   const progressIntervalRef = useRef(null);
+  // ── Approve race-condition guard ────────────────────────────────────────
+  // Stores the transactionId of the approve call currently in-flight.
+  // If the user triggers anything else while a call is pending, the stale
+  // response is silently discarded when it eventually resolves.
+  const approveInFlightId = useRef(null);
   const PIPELINE_ESTIMATED_MS = 35_000; // 35 s = comfortable upper bound
 
   // ── Similar transactions popup state ────────────────────────────
@@ -236,6 +241,9 @@ const Transactions = () => {
   const [reviewValidationMsg, setReviewValidationMsg] = useState('');
   const [reviewApproving, setReviewApproving] = useState(false);
   const [reviewDone, setReviewDone] = useState(false);
+  // Session-scoped map: group_id → { offset_account_id, account_name }
+  // Automatically pre-fills dest account for cards sharing the same group.
+  const reviewGroupCategoryMap = useRef({});
 
   // ── PDF Viewer popup state ────────────────────────────────────────
   const [activeReviewDocumentId, setActiveReviewDocumentId] = useState(null);
@@ -832,6 +840,16 @@ const Transactions = () => {
       showToast('Cannot approve: transaction uses uncategorised account. Please assign a category first.', 'error');
       return;
     }
+    // Block concurrent approve calls — if one is already in flight, do nothing.
+    // This prevents the race where a second click fires a new request whose
+    // response might land before (or after) the first and populate the similar
+    // transactions popup with stale context.
+    if (approveInFlightId.current !== null) return;
+
+    // Mark this transactionId as in-flight
+    approveInFlightId.current = transactionId;
+    setApprovingIds(prev => new Set([...prev, transactionId]));
+
     // Snapshot for rollback
     const prev = transactions.find(t => t.uncategorized_transaction_id === uncatId);
     // Update immediately — zero perceived latency
@@ -858,12 +876,19 @@ const Transactions = () => {
             t.uncategorized_transaction_id === uncatId ? prev : t
           ));
         } else {
-          // Show similar transactions popup if the server found any
           const result = await response.json();
-          if (result.similarTransactions?.length > 0) {
-            setSimilarTxns(result.similarTransactions);
-            setSimilarSuggestedAccount(result.suggestedAccount);
-            setSimilarAccountOverrides({});
+          // ── Race-condition guard ─────────────────────────────────────────
+          // Only open the similar-transactions popup if this response still
+          // corresponds to the approve call that is currently in-flight.
+          // If approveInFlightId was cleared or reassigned while we awaited,
+          // it means the user navigated away or another action superseded this
+          // call — discard silently to avoid populating stale context.
+          if (approveInFlightId.current === transactionId) {
+            if (result.similarTransactions?.length > 0) {
+              setSimilarTxns(result.similarTransactions);
+              setSimilarSuggestedAccount(result.suggestedAccount);
+              setSimilarAccountOverrides({});
+            }
           }
         }
       } catch {
@@ -871,6 +896,14 @@ const Transactions = () => {
         if (prev) setTransactions(p => p.map(t =>
           t.uncategorized_transaction_id === uncatId ? prev : t
         ));
+      } finally {
+        // Clear the in-flight marker regardless of outcome
+        approveInFlightId.current = null;
+        setApprovingIds(prev => {
+          const next = new Set(prev);
+          next.delete(transactionId);
+          return next;
+        });
       }
     })();
   };
@@ -1376,7 +1409,37 @@ const Transactions = () => {
     setReviewEditState({});
     setReviewValidationMsg('');
     setReviewDone(false);
+    reviewGroupCategoryMap.current = {}; // reset session map
     setIsReviewOpen(true);
+  };
+
+  /** Open the review popup for a single specific transaction (queue size = 1). */
+  const openSingleReview = (txn) => {
+    setReviewQueue([txn]);
+    setReviewIndex(0);
+    setReviewEditState({});
+    setReviewValidationMsg('');
+    setReviewDone(false);
+    reviewGroupCategoryMap.current = {}; // reset session map
+    setIsReviewOpen(true);
+  };
+
+  const getEligibleIdsInView = () => {
+    return filteredTransactions.filter(txn => {
+      const isCategorised = txn.transactions && txn.transactions.length > 0;
+      const status = isCategorised ? txn.transactions[0].review_status : 'Pending Categorisation';
+      return status !== 'APPROVED';
+    }).map(t => t.uncategorized_transaction_id);
+  };
+
+  const handleSelectAllFiltered = (e) => {
+    const eligibleIds = getEligibleIdsInView();
+    if (e.target.checked) {
+      setSelectedIds(new Set([...selectedIds, ...eligibleIds]));
+    } else {
+      const currentViewIds = new Set(eligibleIds);
+      setSelectedIds(new Set([...selectedIds].filter(id => !currentViewIds.has(id))));
+    }
   };
 
   const handleManualAddSave = async () => {
@@ -1524,16 +1587,8 @@ const Transactions = () => {
       return next;
     });
 
-    // Move card to end of queue
-    setReviewQueue(prev => {
-      const next = [...prev];
-      const [card] = next.splice(reviewIndex, 1);
-      next.push({ ...card, _siblingPrefill: undefined });
-      return next;
-    });
-
-    // Index stays at same position, which now points to the next card
-    setReviewIndex(prev => Math.min(prev, reviewQueue.length - 2));
+    // Queue stays fixed — just advance the pointer
+    setReviewIndex(prev => (prev + 1 < reviewQueue.length ? prev + 1 : prev));
     setReviewValidationMsg('');
   };
 
@@ -1572,7 +1627,8 @@ const Transactions = () => {
     }
     setReviewApproving(false);
 
-    // Clear edits (they’re now persisted) and move card to end of queue
+    // In single-txn mode just close; otherwise move card to end of queue
+    if (reviewQueue.length === 1) { closeReview(); return; }
     setReviewEditState(prev => {
       const next = { ...prev };
       delete next[uncatId];
@@ -1609,55 +1665,115 @@ const Transactions = () => {
       return;
     }
     setReviewValidationMsg('');
-    setReviewApproving(true);
 
-    try {
-      // ── Classify edits ─────────────────────────────────────────────────────
-      // CORRECTION_FIELDS go to PATCH /correct and may trigger a clean-slate.
-      // offset_account_id is NOT a correction field — it routes to recategorize
-      // or manual-categorize. Including it in coreEdits was causing the bug where
-      // manualCategorizeReviewTxn was called on an already-categorised transaction,
-      // hitting the unique constraint and silently leaving the wrong account.
-      const CORRECTION_FIELDS = ['amount', 'transaction_type', 'details', 'txn_date', 'base_account_id', 'user_note'];
-      const correctionEdits = Object.fromEntries(
-        Object.entries(edits).filter(([k]) => CORRECTION_FIELDS.includes(k))
-      );
-      const hasCorrectionEdits = Object.keys(correctionEdits).length > 0;
-      const noteOnly = hasCorrectionEdits &&
-        Object.keys(correctionEdits).length === 1 &&
-        correctionEdits.user_note !== undefined;
-      const offsetChanged = edits.offset_account_id !== undefined;
+    // ── Classify edits ─────────────────────────────────────────────────────
+    const CORRECTION_FIELDS = ['amount', 'transaction_type', 'details', 'txn_date', 'base_account_id', 'user_note'];
+    const correctionEdits = Object.fromEntries(
+      Object.entries(edits).filter(([k]) => CORRECTION_FIELDS.includes(k))
+    );
+    const hasCorrectionEdits = Object.keys(correctionEdits).length > 0;
+    const noteOnly = hasCorrectionEdits &&
+      Object.keys(correctionEdits).length === 1 &&
+      correctionEdits.user_note !== undefined;
+    const offsetChanged = edits.offset_account_id !== undefined;
 
-      // ── Step 1: Structural correction (triggers clean-slate) ───────────────
-      let cleanSlateHappened = false;
-      let preservedNote = edits.user_note;
+    // ── Snapshot queue state for UI advance ───────────────────────────────
+    const currentReviewIndex = reviewIndex;
+    const currentQueueLength = reviewQueue.length;
+    const nextCard = reviewQueue[currentReviewIndex + 1];
+    const hasSiblingNext = !!(nextCard
+      && nextCard.group_id
+      && nextCard.group_id === current.group_id);
 
-      if (hasCorrectionEdits && !noteOnly) {
-        const correctResult = await saveReviewCorrection(current, correctionEdits);
-        if (correctResult !== null) {
-          // /correct deleted the transactions row — need a fresh manualCategorize
-          cleanSlateHappened = true;
-        }
-        if (correctResult?.preserved_note !== undefined && edits.user_note === undefined) {
-          preservedNote = correctResult.preserved_note;
-        }
+    // Optimistically mark current card as approved and pre-fill sibling
+    setReviewQueue(prev => {
+      const nextQ = [...prev];
+      if (nextQ[currentReviewIndex]) {
+        nextQ[currentReviewIndex] = {
+          ...nextQ[currentReviewIndex],
+          transactions: [{
+            ...(nextQ[currentReviewIndex].transactions?.[0] || {}),
+            review_status: 'APPROVED',
+            offset_account_id: offsetAccountId,
+            accounts: { account_name: offsetAccountName }
+          }]
+        };
       }
-
-      // ── Step 2: Note-only save (no clean-slate) ────────────────────────────
-      if (hasCorrectionEdits && noteOnly && txnRow?.transaction_id) {
-        await saveNoteOnly(txnRow.transaction_id, correctionEdits.user_note);
+      if (hasSiblingNext) {
+        nextQ[currentReviewIndex + 1] = {
+          ...nextQ[currentReviewIndex + 1],
+          _siblingPrefill: { offset_account_id: offsetAccountId, account_name: offsetAccountName }
+        };
       }
+      return nextQ;
+    });
 
-      // ── Step 3: Approve / categorize ──────────────────────────────────────
-      let approveResult = null;
-      if (!isCategorised || cleanSlateHappened) {
-        // Uncategorised row, or the transactions row was just deleted by /correct.
-        // Create a fresh transactions row via manual-categorize.
-        approveResult = await manualCategorizeReviewTxn(uncatId, offsetAccountId);
+    // Record this group_id → category mapping for the session
+    if (current.group_id) {
+      reviewGroupCategoryMap.current[current.group_id] = {
+        offset_account_id: offsetAccountId,
+        account_name: offsetAccountName
+      };
+    }
 
-        // Re-apply preserved note on the newly created transactions row
-        if (preservedNote) {
-          (async () => {
+    if (currentReviewIndex >= currentQueueLength - 1) {
+      // Last card — close the review panel
+      setReviewDone(true);
+      setTimeout(() => closeReview(), 1500);
+    } else {
+      // Advance to next card immediately
+      setReviewIndex(prev => prev + 1);
+      setReviewEditState(prev => {
+        const next = { ...prev };
+        delete next[uncatId];
+        // Pre-fill ALL remaining cards in this group using the session map
+        reviewQueue.slice(currentReviewIndex + 1).forEach(card => {
+          if (!card.group_id) return;
+          const groupEntry = reviewGroupCategoryMap.current[card.group_id];
+          if (!groupEntry) return;
+          const cardUncatId = card.uncategorized_transaction_id;
+          const existing = next[cardUncatId];
+          if (!existing?.offset_account_id || existing?._sibling_suggested) {
+            next[cardUncatId] = {
+              ...(existing || {}),
+              offset_account_id: groupEntry.offset_account_id,
+              _offset_account_name: groupEntry.account_name,
+              _sibling_suggested: true
+            };
+          }
+        });
+        return next;
+      });
+    }
+
+    // ── Fire all API calls silently in the background ──────────────────────
+    ;(async () => {
+      try {
+        let cleanSlateHappened = false;
+        let preservedNote = edits.user_note;
+
+        // Step 1: Structural correction (triggers clean-slate)
+        if (hasCorrectionEdits && !noteOnly) {
+          const correctResult = await saveReviewCorrection(current, correctionEdits);
+          if (correctResult !== null) {
+            cleanSlateHappened = true;
+          }
+          if (correctResult?.preserved_note !== undefined && edits.user_note === undefined) {
+            preservedNote = correctResult.preserved_note;
+          }
+        }
+
+        // Step 2: Note-only save (no clean-slate)
+        if (hasCorrectionEdits && noteOnly && txnRow?.transaction_id) {
+          await saveNoteOnly(txnRow.transaction_id, correctionEdits.user_note);
+        }
+
+        // Step 3: Approve / categorize
+        let approveResult = null;
+        if (!isCategorised || cleanSlateHappened) {
+          approveResult = await manualCategorizeReviewTxn(uncatId, offsetAccountId);
+
+          if (preservedNote) {
             try {
               const { data: { user } } = await supabase.auth.getUser();
               const { data: newTxn } = await supabase
@@ -1670,101 +1786,36 @@ const Transactions = () => {
                 await saveNoteOnly(newTxn.transaction_id, preservedNote);
               }
             } catch {}
-          })();
-        }
-      } else if (offsetChanged) {
-        // Categorised PENDING — user picked a different destination account.
-        // Recategorize (updates the existing transactions row), then approve.
-        const { data: { session } } = await supabase.auth.getSession();
-        const recatRes = await fetch(
-          `${API_BASE_URL}/api/transactions/${txnRow.transaction_id}/recategorize`,
-          {
-            method: 'PATCH',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${session?.access_token || ''}`
-            },
-            body: JSON.stringify({ offset_account_id: offsetAccountId })
           }
-        );
-        if (!recatRes.ok) {
-          const recatJson = await recatRes.json();
-          throw new Error(recatJson.error || 'Recategorize failed');
-        }
-        approveResult = await recatRes.json(); // recategorize returns similarTransactions
-        await approveReviewTxn(txnRow.transaction_id);
-      } else {
-        // Categorised PENDING, no offset change — pure approval (or note-only).
-        approveResult = await approveReviewTxn(txnRow.transaction_id);
-      }
-
-      // Show similar transactions popup if the server found any
-      if (approveResult?.similarTransactions?.length > 0) {
-        setSimilarTxns(approveResult.similarTransactions);
-        setSimilarSuggestedAccount(approveResult.suggestedAccount);
-        setSimilarAccountOverrides({});
-      }
-
-      // ── Step 4+5: Pre-fill next sibling (if same group) then advance queue ───
-      //
-      // Only look at the IMMEDIATE next card. When the user approves that one,
-      // the same logic fires for the card after it — cascading naturally.
-      // Skip and Save & Skip never reach this path.
-      const nextCard = reviewQueue[reviewIndex + 1];
-      const hasSiblingNext = !!(nextCard
-        && nextCard.group_id
-        && nextCard.group_id === current.group_id);
-
-      console.log('[Review] Sibling pre-fill check:', {
-        approvedUncatId: uncatId,
-        approvedGroup: current.group_id,
-        nextCardGroup: nextCard?.group_id,
-        hasSiblingNext,
-        queueLength: reviewQueue.length,
-        reviewIndex
-      });
-      // Single queue update: remove approved card + optionally stamp sibling
-      setReviewQueue(prev => {
-        const filtered = prev.filter((_, i) => i !== reviewIndex);
-        if (!hasSiblingNext) return filtered;
-        // After removal the next card shifts to reviewIndex position
-        return filtered.map((q, i) => {
-          if (i !== reviewIndex) return q;
-          return { ...q, _siblingPrefill: { offset_account_id: offsetAccountId, account_name: offsetAccountName } };
-        });
-      });
-
-      if (reviewQueue.length - 1 === 0) {
-        setReviewDone(true);
-        setTimeout(() => closeReview(), 1500);
-      } else {
-        setReviewIndex(prev => Math.min(prev, reviewQueue.length - 2));
-        setReviewEditState(prev => {
-          const next = { ...prev };
-          // Clear the just-approved card's edits
-          delete next[uncatId];
-          // Pre-fill the next sibling's editState so approval works immediately
-          if (hasSiblingNext) {
-            const nextUncatId = nextCard.uncategorized_transaction_id;
-            const existing = next[nextUncatId];
-            // Don't overwrite if user already manually picked a non-suggested account
-            if (!existing?.offset_account_id || existing?._sibling_suggested) {
-              next[nextUncatId] = {
-                ...(existing || {}),
-                offset_account_id: offsetAccountId,
-                _offset_account_name: offsetAccountName,
-                _sibling_suggested: true
-              };
+        } else if (offsetChanged) {
+          const { data: { session } } = await supabase.auth.getSession();
+          const recatRes = await fetch(
+            `${API_BASE_URL}/api/transactions/${txnRow.transaction_id}/recategorize`,
+            {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${session?.access_token || ''}`
+              },
+              body: JSON.stringify({ offset_account_id: offsetAccountId })
             }
+          );
+          if (!recatRes.ok) {
+            const recatJson = await recatRes.json();
+            throw new Error(recatJson.error || 'Recategorize failed');
           }
-          return next;
-        });
+          approveResult = await recatRes.json();
+          await approveReviewTxn(txnRow.transaction_id);
+        } else {
+          approveResult = await approveReviewTxn(txnRow.transaction_id);
+        }
+
+        // Similar-transaction popup is disabled in manual review — group_id
+        // session memory handles bulk pre-filling within the review queue.
+      } catch (err) {
+        showToast(err.message || 'Background approval failed', 'error');
       }
-    } catch (err) {
-      showToast(err.message || 'Failed to approve', 'error');
-    } finally {
-      setReviewApproving(false);
-    }
+    })();
   };
 
   // ── Keyboard handler for the review popup ────────────────────────
@@ -1830,10 +1881,71 @@ const Transactions = () => {
     return dateSortOrder === 'asc' ? tA - tB : tB - tA;
   });
 
+  const eligibleIdsInView = getEligibleIdsInView();
+  const isAllSelected = eligibleIdsInView.length > 0 && eligibleIdsInView.every(id => selectedIds.has(id));
+
+  // True iff at least one checkbox is checked AND every checked row is PENDING (not yet approved,
+  // not uncategorised). This is the condition for showing the inline Approve Selected button.
+  const allSelectedArePendingApproval = selectedIds.size > 0 && (() => {
+    const selectedTxns = filteredTransactions.filter(
+      txn => selectedIds.has(txn.uncategorized_transaction_id)
+    );
+    return selectedTxns.length === selectedIds.size &&
+      selectedTxns.every(txn => {
+        const row = txn.transactions?.[0];
+        return row && row.review_status === 'PENDING' && !row.is_uncategorised;
+      });
+  })();
+
   const handleFilterChange = (newFilter) => {
     setActiveFilter(newFilter);
     if (newFilter !== 'PENDING_APP') {
       setSelectedIds(new Set());
+    }
+  };
+
+  /** Approve all currently-selected rows (from the ALL-table checkbox selection).
+   *  Maps uncategorized_transaction_id → transaction_id before calling the bulk API. */
+  const handleBulkApproveSelected = async () => {
+    if (!allSelectedArePendingApproval) return;
+    const transactionIds = filteredTransactions
+      .filter(txn => selectedIds.has(txn.uncategorized_transaction_id))
+      .map(txn => txn.transactions[0].transaction_id)
+      .filter(Boolean);
+    if (transactionIds.length === 0) return;
+    setIsApprovingBulk(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch(`${API_BASE_URL}/api/transactions/approve-bulk`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token || ''}`
+        },
+        body: JSON.stringify({ transaction_ids: transactionIds })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        const approvedCount = data.approved_count ?? transactionIds.length;
+        showToast(`${approvedCount} transaction${approvedCount !== 1 ? 's' : ''} approved`, 'success');
+        const blockedSet = new Set(data.blocked_transaction_ids || []);
+        setTransactions(prev => prev.map(txn => {
+          if (!txn.transactions?.[0]) return txn;
+          const tid = txn.transactions[0].transaction_id;
+          if (transactionIds.includes(tid) && !blockedSet.has(tid)) {
+            return { ...txn, transactions: [{ ...txn.transactions[0], review_status: 'APPROVED' }] };
+          }
+          return txn;
+        }));
+        setSelectedIds(new Set());
+      } else {
+        showToast(data.error || 'Bulk approval failed', 'error');
+      }
+    } catch (err) {
+      console.error('Bulk approve failed:', err);
+      showToast('Bulk approval failed', 'error');
+    } finally {
+      setIsApprovingBulk(false);
     }
   };
 
@@ -1856,9 +1968,9 @@ const Transactions = () => {
       (txn) => txn.transactions[0].attention_level === level
     );
     const selectableTxns = txnsInLevel.filter((txn) => !txn.transactions[0].is_uncategorised);
-    const idsInLevel = new Set(selectableTxns.map((txn) => txn.transactions[0].transaction_id));
+    const idsInLevel = new Set(selectableTxns.map((txn) => txn.uncategorized_transaction_id));
     const allSelected = selectableTxns.every((txn) =>
-      selectedIds.has(txn.transactions[0].transaction_id)
+      selectedIds.has(txn.uncategorized_transaction_id)
     );
     if (allSelected) {
       const newSelected = new Set(selectedIds);
@@ -1875,7 +1987,7 @@ const Transactions = () => {
     );
     const selectableTxns = txnsInLevel.filter((txn) => !txn.transactions[0].is_uncategorised);
     return selectableTxns.length > 0 && selectableTxns.every((txn) =>
-      selectedIds.has(txn.transactions[0].transaction_id)
+      selectedIds.has(txn.uncategorized_transaction_id)
     );
   };
 
@@ -1885,24 +1997,9 @@ const Transactions = () => {
     const isDebit = txn.debit != null;
     const amount = isDebit ? txn.debit : txn.credit;
 
-    if (correctingId === txn.uncategorized_transaction_id) {
-      return (
-        <AmountEditor
-          txn={txn}
-          onSave={handleCorrect}
-          onCancel={() => setCorrectingId(null)}
-        />
-      );
-    }
-
     return (
-      <div
-        className={`amount-cell-clickable ${isDebit ? 'debit-cell' : 'credit-cell'}`}
-        title="Click to correct amount or type"
-        onClick={() => setCorrectingId(txn.uncategorized_transaction_id)}
-      >
+      <div className={`amount-cell-clickable ${isDebit ? 'debit-cell' : 'credit-cell'}`}>
         {isDebit ? `- ₹${amount}` : `+ ₹${amount}`}
-        <span className="amount-edit-hint">✎</span>
       </div>
     );
   };
@@ -1946,11 +2043,11 @@ const Transactions = () => {
             <button
               id="transactions-review-btn"
               className="action-btn review-btn"
-              onClick={openReview}
+              onClick={() => openReview()}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              Review
+              {selectedIds.size > 0 ? `Review (${selectedIds.size})` : 'Review'}
             </button>
           )}
           {activeFilter === 'PENDING_APP' ? (
@@ -1962,6 +2059,18 @@ const Transactions = () => {
             >
               {isApprovingBulk ? <span className="spinner-small"></span> : <ICONS.Check />}
               {isApprovingBulk ? `Approving ${selectedIds.size}...` : `Approve Selected (${selectedIds.size})`}
+            </button>
+          ) : allSelectedArePendingApproval ? (
+            <button
+              className="action-btn approve-selected has-selection"
+              onClick={handleBulkApproveSelected}
+              disabled={isApprovingBulk}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              {isApprovingBulk
+                ? <><span className="spinner-small"></span> Approving…</>
+                : <><ICONS.Check /> Approve Selected ({selectedIds.size})</>
+              }
             </button>
           ) : (
             <button
@@ -2295,8 +2404,18 @@ const Transactions = () => {
                 </div>
               ) : getGroupedTransactions() && getGroupedTransactions().length > 0 ? (
                 <>
-                  <div className="table-header grouped">
-                    <div></div>
+                  <div 
+                    className="table-header uniform-layout"
+                    style={{ gridTemplateColumns: '30px 90px 1fr 110px 220px 130px' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <input
+                        type="checkbox"
+                        className="row-checkbox"
+                        checked={isAllSelected}
+                        onChange={handleSelectAllFiltered}
+                      />
+                    </div>
                     <div
                       style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
                       onClick={() => setDateSortOrder(p => p === 'desc' ? 'asc' : 'desc')}
@@ -2304,9 +2423,8 @@ const Transactions = () => {
                       Date {dateSortOrder === 'desc' ? '↓' : '↑'}
                     </div>
                     <div>Details</div>
-                    <div>Amount</div>
-                    <div>Src Acc</div>
-                    <div>Dest Acc</div>
+                    <div style={{ textAlign: 'right', display: 'block', width: '100%' }}>Amount</div>
+                    <div>Account (Src → Dest)</div>
                     <div>Categorised By</div>
                   </div>
                   <div className="placeholder-rows">
@@ -2320,26 +2438,30 @@ const Transactions = () => {
                             {isGroupSelected(group.level) ? '✓ Deselect' : '☐ Select'}
                           </button>
                           <span className={`attention-label ${group.level.toLowerCase()}`}>
-                            {group.level} ATTENTION
-                          </span>
-                          <span style={{ marginLeft: 'auto', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                            ({group.transactions.length})
+                            {group.level} ATTENTION ({group.transactions.length})
                           </span>
                         </div>
                         {group.transactions.map((txn) => {
-                          const isChecked = selectedIds.has(txn.transactions[0].transaction_id);
                           const accountName = txn.transactions[0].accounts
                             ? txn.transactions[0].accounts.account_name
                             : '-';
                           const isUncategorised = txn.transactions[0].is_uncategorised;
                           const categorisedBy = txn.transactions[0].categorised_by || '-';
+                          const transactionId = txn.transactions[0].transaction_id;
+                          const isApproving = approvingIds.has(transactionId);
+                          const isChecked = selectedIds.has(txn.uncategorized_transaction_id);
 
                           return (
                             <div
                               key={txn.uncategorized_transaction_id}
-                              className={`table-row grouped ${isApprovingBulk && selectedIds.has(txn.transactions[0].transaction_id) ? 'row-approving' : ''}`}
+                              className={`table-row uniform-layout ${txn.debit != null ? 'row-debit' : 'row-credit'} ${isApprovingBulk && isChecked ? 'row-approving' : ''}`}
+                              onClick={(e) => {
+                                if (e.target.closest('button') || e.target.closest('.account-src') || e.target.closest('.account-dest') || e.target.closest('.amount-editor') || e.target.closest('input[type="checkbox"]')) return;
+                                openReview(txn.uncategorized_transaction_id);
+                              }}
+                              style={{ cursor: 'pointer', gridTemplateColumns: '30px 90px 1fr 110px 220px 130px' }}
                             >
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
                                 <input
                                   type="checkbox"
                                   className="row-checkbox"
@@ -2348,35 +2470,49 @@ const Transactions = () => {
                                   onChange={() => {
                                     const newSelected = new Set(selectedIds);
                                     if (isChecked) {
-                                      newSelected.delete(txn.transactions[0].transaction_id);
+                                      newSelected.delete(txn.uncategorized_transaction_id);
                                     } else {
-                                      newSelected.add(txn.transactions[0].transaction_id);
+                                      newSelected.add(txn.uncategorized_transaction_id);
                                     }
                                     setSelectedIds(newSelected);
                                   }}
                                 />
                               </div>
                               <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
-                              <div className="details-cell">{txn.details}</div>
-                              {renderAmountCell(txn)}
-                              <div
-                                className="account-cell-clickable"
-                                onClick={() => setSrcAccTarget(txn)}
-                                style={{ cursor: 'pointer' }}
-                                title="Click to change base account"
-                              >
-                                {txn.source_account?.account_name || '-'}
+                              <div className="details-cell raw-details" title={txn.details ? `Full description: ${txn.details}` : ''}>{txn.details}</div>
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                                {renderAmountCell(txn)}
                               </div>
-                              <div
-                                className={txn.transactions[0].accounts ? 'account-cell-clickable' : ''}
-                                onClick={() => { if (txn.transactions[0].accounts) setRecatTarget(txn); }}
-                                style={{ cursor: txn.transactions[0].accounts ? 'pointer' : 'default' }}
-                              >
-                                {accountName}
+                              <div className="account-directional-cell">
+                                <span className="account-src" onClick={() => setSrcAccTarget(txn)} title="Click to change the source bank or card account">
+                                  {txn.source_account?.account_name || '-'}
+                                </span>
+                                <span className="account-arrow">→</span>
+                                <span
+                                  className={`account-dest ${txn.transactions[0].accounts ? 'account-cell-clickable' : ''}`}
+                                  onClick={() => { if (txn.transactions[0].accounts) setRecatTarget(txn); }}
+                                  style={{ cursor: txn.transactions[0].accounts ? 'pointer' : 'default' }}
+                                  title="Click to change category"
+                                >
+                                  {accountName}
+                                </span>
                               </div>
                               <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                                 {categorisedBy}
                               </div>
+                              {/* Slide-in approve button */}
+                              {!isUncategorised && (
+                                <div className="slide-approve-wrapper">
+                                  <button
+                                    className="slide-approve-btn"
+                                    onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
+                                    disabled={isApproving}
+                                    title="Mark as approved"
+                                  >
+                                    {isApproving ? <span className="spinner-small" style={{ borderColor: 'white', borderTopColor: 'transparent' }}></span> : <ICONS.Check />}
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -2396,15 +2532,23 @@ const Transactions = () => {
           ) : (
             <>
               <div
-                className="table-header"
+                className="table-header uniform-layout"
                 style={{
                   gridTemplateColumns: activeFilter === 'PENDING_CAT'
-                    ? '110px 1fr 110px 130px 150px 160px'
+                    ? '30px 90px 1fr 110px 220px'
                     : activeFilter === 'APPROVED'
-                    ? '110px 1fr 110px 130px 150px 140px'
-                    : '110px 1fr 110px 130px 150px 140px 160px 40px'
+                    ? '30px 90px 1fr 110px 220px 130px'
+                    : undefined
                 }}
               >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <input
+                    type="checkbox"
+                    className="row-checkbox"
+                    checked={isAllSelected}
+                    onChange={handleSelectAllFiltered}
+                  />
+                </div>
                 <div
                   style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}
                   onClick={() => setDateSortOrder(p => p === 'desc' ? 'asc' : 'desc')}
@@ -2412,12 +2556,10 @@ const Transactions = () => {
                   Date {dateSortOrder === 'desc' ? '↓' : '↑'}
                 </div>
                 <div>Details</div>
-                <div>Amount</div>
-                <div>Src Acc</div>
-                <div>Dest Acc</div>
+                <div style={{ textAlign: 'right', display: 'block', width: '100%' }}>Amount</div>
+                <div>Account (Src → Dest)</div>
                 {activeFilter !== 'PENDING_CAT' && <div>Categorised By</div>}
-                {activeFilter !== 'APPROVED' && <div>Status</div>}
-                {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && <div>Actions</div>}
+                {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && <div>Status</div>}
               </div>
               <div id="transactions-table" className="placeholder-rows">
                 {loading ? (
@@ -2456,103 +2598,106 @@ const Transactions = () => {
                     return (
                       <div
                         key={txn.uncategorized_transaction_id}
-                        className={`table-row ${isApprovingBulk && selectedIds.has(transactionId) ? 'row-approving' : ''}`}
+                        className={`table-row uniform-layout ${txn.debit != null ? 'row-debit' : 'row-credit'} ${isApprovingBulk && selectedIds.has(transactionId) ? 'row-approving' : ''}`}
+                        onClick={(e) => {
+                          if (e.target.closest('button') || e.target.closest('.account-src') || e.target.closest('.account-dest') || e.target.closest('.amount-editor') || e.target.closest('input[type="checkbox"]')) return;
+                          openReview(txn.uncategorized_transaction_id);
+                        }}
                         style={{
+                          cursor: 'pointer',
                           gridTemplateColumns: activeFilter === 'PENDING_CAT'
-                            ? '110px 1fr 110px 130px 150px 160px'
+                            ? '30px 90px 1fr 110px 220px'
                             : activeFilter === 'APPROVED'
-                            ? '110px 1fr 110px 130px 150px 140px'
-                            : '110px 1fr 110px 130px 150px 140px 160px 40px'
+                            ? '30px 90px 1fr 110px 220px 130px'
+                            : undefined
                         }}
                       >
-                        <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
-                        <div className="details-cell">{txn.details}</div>
-                        {renderAmountCell(txn)}
-                        <div
-                          className="account-cell-clickable"
-                          onClick={() => setSrcAccTarget(txn)}
-                          style={{ cursor: 'pointer' }}
-                          title="Click to change base account"
-                        >
-                          {txn.source_account?.account_name || '-'}
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+                          <input
+                            type="checkbox"
+                            className="row-checkbox"
+                            checked={selectedIds.has(txn.uncategorized_transaction_id)}
+                            disabled={status === 'APPROVED'}
+                            onChange={() => {
+                              const newSelected = new Set(selectedIds);
+                              if (selectedIds.has(txn.uncategorized_transaction_id)) {
+                                newSelected.delete(txn.uncategorized_transaction_id);
+                              } else {
+                                newSelected.add(txn.uncategorized_transaction_id);
+                              }
+                              setSelectedIds(newSelected);
+                            }}
+                          />
                         </div>
-                        <div
-                          className={
-                            `${
-                              isCategorised && txn.transactions[0].accounts
-                                ? 'account-cell-clickable'
-                                : isCategorised === false
-                                ? 'account-cell-clickable uncategorised'
-                                : ''
-                            }${isRowProcessing(txn) ? ' is-processing' : ''}${isRowFailed(txn) ? ' is-pipeline-failed' : ''}`
-                          }
-                          onClick={() => {
-                            if (isRowProcessing(txn) || isRowFailed(txn)) return;
-                            if (isCategorised && txn.transactions[0].accounts) {
-                              setRecatTarget(txn);
-                            } else if (!isCategorised) {
-                              setManualTarget(txn);
+                        <div>{new Date(txn.txn_date).toLocaleDateString()}</div>
+                        <div className="details-cell raw-details" title={txn.details ? `Full description: ${txn.details}` : ''}>{txn.details}</div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                          {renderAmountCell(txn)}
+                        </div>
+                        <div className="account-directional-cell">
+                          <span className="account-src" onClick={() => setSrcAccTarget(txn)} title="Click to change the source bank or card account for this transaction">
+                            {txn.source_account?.account_name || '-'}
+                          </span>
+                          <span className="account-arrow">→</span>
+                          <span
+                            className={
+                              `account-dest ${
+                                isCategorised && txn.transactions[0].accounts
+                                  ? 'account-cell-clickable'
+                                  : isCategorised === false
+                                  ? 'account-cell-clickable uncategorised'
+                                  : ''
+                              }${isRowProcessing(txn) ? ' is-processing' : ''}${isRowFailed(txn) ? ' is-pipeline-failed' : ''}`
                             }
-                          }}
-                          style={{
-                            cursor:
-                              isRowProcessing(txn) || isRowFailed(txn)
-                                ? 'default'
-                                : (isCategorised && txn.transactions[0].accounts) || !isCategorised
-                                ? 'pointer'
-                                : 'default'
-                          }}
-                          title={isRowProcessing(txn) ? 'Auto-categorising…' : isRowFailed(txn) ? 'Pipeline failed — click Retry' : undefined}
-                        >
-                          {isRowProcessing(txn)
-                            ? <span className="processing-label">🔒 Processing…</span>
-                            : isRowFailed(txn)
-                            ? <span className="processing-label">⚠ Failed</span>
-                            : isCategorised ? accountName : '+ Assign'
-                          }
+                            onClick={() => {
+                              if (isRowProcessing(txn) || isRowFailed(txn)) return;
+                              if (isCategorised && txn.transactions[0].accounts) {
+                                setRecatTarget(txn);
+                              } else if (!isCategorised) {
+                                setManualTarget(txn);
+                              }
+                            }}
+                            style={{
+                              cursor:
+                                isRowProcessing(txn) || isRowFailed(txn)
+                                  ? 'default'
+                                  : (isCategorised && txn.transactions[0].accounts) || !isCategorised
+                                  ? 'pointer'
+                                  : 'default'
+                            }}
+                            title={isRowProcessing(txn) ? 'AI is categorising this transaction — it will update shortly' : isRowFailed(txn) ? 'Categorisation failed — use the Retry button above to try again' : 'Click to assign or change the category for this transaction'}
+                          >
+                            {isRowProcessing(txn)
+                              ? '🔒 Processing…'
+                              : isRowFailed(txn)
+                              ? '⚠ Failed'
+                              : isCategorised ? accountName : '+ Assign'
+                            }
+                          </span>
                         </div>
                         {activeFilter !== 'PENDING_CAT' && (
                           <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
                             {categorisedBy}
                           </div>
                         )}
-                        {activeFilter !== 'APPROVED' && (
+                        {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && (
                           <div>
                             <span className={`status-badge ${status.toLowerCase().replace(' ', '-')}`}>
                               {status === 'PENDING' ? 'Pending Approval' : status}
                             </span>
                           </div>
                         )}
-                        {activeFilter !== 'PENDING_CAT' && activeFilter !== 'APPROVED' && (
-                          <div className="actions-cell">
-                            {isRowProcessing(txn) ? (
-                              <span className="processing-label" style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                🔒
-                              </span>
-                            ) : isRowFailed(txn) ? (
-                              <span
-                                className="processing-label"
-                                style={{ fontSize: '12px', color: '#F59E0B' }}
-                                title="Pipeline failed — click Retry above"
-                              >
-                                ⚠
-                              </span>
-                            ) : status === 'PENDING' && isCategorised ? (
-                              <button
-                                className="action-icon-btn approve"
-                                onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
-                                title="Approve"
-                                disabled={isApproving}
-                              >
-                                {isApproving ? (
-                                  <span className="spinner-small"></span>
-                                ) : (
-                                  <ICONS.Check />
-                                )}
-                              </button>
-                            ) : (
-                              <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>—</span>
-                            )}
+
+                        {status === 'PENDING' && isCategorised && !isUncategorised && !isRowProcessing(txn) && !isRowFailed(txn) && (
+                          <div className="slide-approve-wrapper">
+                            <button
+                              className="slide-approve-btn"
+                              onClick={() => handleApprove(transactionId, isUncategorised, txn.uncategorized_transaction_id)}
+                              disabled={isApproving}
+                              title="Mark as approved and move to your ledger"
+                            >
+                              {isApproving ? <span className="spinner-small" style={{ borderColor: 'white', borderTopColor: 'transparent' }}></span> : <ICONS.Check />}
+                            </button>
                           </div>
                         )}
                       </div>
@@ -2737,6 +2882,29 @@ const Transactions = () => {
               const siblingPrefill = current._siblingPrefill;
               const isSuggested = edits._sibling_suggested;
 
+              // Auto-prefill from session group map if no account is set yet
+              if (current.group_id && !edits.offset_account_id && !isCategorised) {
+                const groupEntry = reviewGroupCategoryMap.current[current.group_id];
+                if (groupEntry) {
+                  // Fire synchronously into editState — only if not already set
+                  setTimeout(() => {
+                    setReviewEditState(prev => {
+                      const existing = prev[uncatId];
+                      if (existing?.offset_account_id) return prev; // already set, skip
+                      return {
+                        ...prev,
+                        [uncatId]: {
+                          ...(existing || {}),
+                          offset_account_id: groupEntry.offset_account_id,
+                          _offset_account_name: groupEntry.account_name,
+                          _sibling_suggested: true
+                        }
+                      };
+                    });
+                  }, 0);
+                }
+              }
+
               // Status badge
               const statusLabel = isCategorised
                 ? (txnRow.review_status === 'PENDING' ? 'Pending Approval' : txnRow.review_status)
@@ -2874,74 +3042,107 @@ const Transactions = () => {
                     <div className="review-validation-msg">{reviewValidationMsg}</div>
                   )}
 
-                  {/* Footer — 4-slot layout: Prev | Save | Next | Approve */}
+                  {/* Footer */}
                   <div className="review-footer">
-                    {/* ← Prev: invisible on first card */}
-                    <button
-                      className="action-btn review-prev-btn"
-                      onClick={handleReviewPrev}
-                      disabled={reviewApproving || reviewIndex === 0}
-                      title="Go back to the previous transaction (←)"
-                      style={{ visibility: reviewIndex === 0 ? 'hidden' : 'visible' }}
-                    >
-                      ← Prev
-                    </button>
-
-                    {/* Save: invisible when no unsaved edits */}
-                    {(() => {
-                      const hasEdits = Object.keys(reviewEditState[reviewQueue[reviewIndex]?.uncategorized_transaction_id] || {}).length > 0;
-                      return (
+                    {reviewQueue.length === 1 ? (
+                      /* Single-txn mode: Save & Close + Approve & Close */
+                      <>
                         <button
                           className="action-btn review-save-skip-btn"
                           onClick={handleReviewSaveAndSkip}
-                          disabled={reviewApproving || !hasEdits}
-                          title="Save your changes to this transaction without approving it"
-                          style={{ visibility: hasEdits ? 'visible' : 'hidden' }}
+                          disabled={reviewApproving}
+                          title="Save changes without approving and close"
                         >
                           {reviewApproving
                             ? <><span className="spinner-small"></span> Saving…</>
-                            : 'Save'
+                            : 'Save & Close'
                           }
                         </button>
-                      );
-                    })()}
-
-                    {/* Next */}
-                    <button
-                      className="action-btn review-skip-btn"
-                      onClick={handleReviewSkip}
-                      disabled={reviewApproving}
-                      title="Move to the next transaction without saving (Space / →)"
-                    >
-                      Next →
-                    </button>
-
-                    {/* Approve — different label/style for already-approved rows */}
-                    {txnRow?.review_status !== 'APPROVED' ? (
-                      <button
-                        className="action-btn approve-selected has-selection review-approve-btn"
-                        onClick={handleReviewApprove}
-                        disabled={reviewApproving}
-                        title="Approve this transaction and move to the next one (Enter)"
-                      >
-                        {reviewApproving
-                          ? <><span className="spinner-small"></span> Approving…</>
-                          : <><ICONS.Check /> Approve</>
-                        }
-                      </button>
+                        {txnRow?.review_status !== 'APPROVED' && (
+                          <button
+                            className="action-btn approve-selected has-selection review-approve-btn"
+                            onClick={handleReviewApprove}
+                            disabled={reviewApproving}
+                            title="Approve this transaction and close (Enter)"
+                          >
+                            {reviewApproving
+                              ? <><span className="spinner-small"></span> Approving…</>
+                              : <><ICONS.Check /> Approve & Close</>
+                            }
+                          </button>
+                        )}
+                      </>
                     ) : (
-                      <button
-                        className="action-btn review-approve-btn"
-                        onClick={handleReviewApprove}
-                        disabled={reviewApproving}
-                        title="Save changes and move to the next transaction (Enter)"
-                        style={{ background: 'var(--primary-action)', color: 'white' }}
-                      >
-                        {reviewApproving
-                          ? <><span className="spinner-small"></span> Saving…</>
-                          : <><ICONS.Check /> Approve</>
-                        }
-                      </button>
+                      /* Multi-txn mode: Prev | Save | Next | Approve & Next */
+                      <>
+                        {/* ← Prev: invisible on first card */}
+                        <button
+                          className="action-btn review-prev-btn"
+                          onClick={handleReviewPrev}
+                          disabled={reviewApproving || reviewIndex === 0}
+                          title="Go back to the previous transaction (←)"
+                          style={{ visibility: reviewIndex === 0 ? 'hidden' : 'visible' }}
+                        >
+                          ← Prev
+                        </button>
+
+                        {/* Save: invisible when no unsaved edits */}
+                        {(() => {
+                          const hasEdits = Object.keys(reviewEditState[reviewQueue[reviewIndex]?.uncategorized_transaction_id] || {}).length > 0;
+                          return (
+                            <button
+                              className="action-btn review-save-skip-btn"
+                              onClick={handleReviewSaveAndSkip}
+                              disabled={reviewApproving || !hasEdits}
+                              title="Save your changes to this transaction without approving it"
+                              style={{ visibility: hasEdits ? 'visible' : 'hidden' }}
+                            >
+                              {reviewApproving
+                                ? <><span className="spinner-small"></span> Saving…</>
+                                : 'Save'
+                              }
+                            </button>
+                          );
+                        })()}
+
+                        {/* Next */}
+                        <button
+                          className="action-btn review-skip-btn"
+                          onClick={handleReviewSkip}
+                          disabled={reviewApproving || reviewIndex >= reviewQueue.length - 1}
+                          title="Move to the next transaction without saving (Space / →)"
+                        >
+                          Next →
+                        </button>
+
+                        {/* Approve & Next */}
+                        {txnRow?.review_status !== 'APPROVED' ? (
+                          <button
+                            className="action-btn approve-selected has-selection review-approve-btn"
+                            onClick={handleReviewApprove}
+                            disabled={reviewApproving}
+                            title="Approve this transaction and move to the next one (Enter)"
+                          >
+                            {reviewApproving
+                              ? <><span className="spinner-small"></span> Approving…</>
+                              : <><ICONS.Check /> Approve & Next</>
+                            }
+                          </button>
+                        ) : (
+                          <button
+                            className="action-btn review-approve-btn"
+                            onClick={handleReviewApprove}
+                            disabled={reviewApproving}
+                            title="Save changes and move to the next transaction (Enter)"
+                            style={{ background: 'var(--primary-action)', color: 'white' }}
+                          >
+                            {reviewApproving
+                              ? <><span className="spinner-small"></span> Saving…</>
+                              : <><ICONS.Check /> Approve & Next</>
+                            }
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                 </>

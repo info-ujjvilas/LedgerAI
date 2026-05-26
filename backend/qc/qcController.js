@@ -184,7 +184,7 @@ const getGlobalVectorCache = async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('global_vector_cache')
-            .select('cache_id, clean_name, target_template_id, approval_count, is_verified, created_at, updated_at')
+            .select('cache_id, clean_name, target_template_id, is_semantic_anchor, approval_count, is_verified, created_at, updated_at')
             .order('cache_id', { ascending: true });
 
         if (error) throw error;
@@ -197,7 +197,7 @@ const getGlobalVectorCache = async (req, res) => {
 
 const createVectorCacheEntry = async (req, res) => {
     try {
-        const { clean_name, target_template_id } = req.body;
+        const { clean_name, target_template_id, is_semantic_anchor } = req.body;
         if (!clean_name) return res.status(400).json({ error: 'clean_name is required.' });
 
         const uppercaseName = clean_name.trim().toUpperCase();
@@ -228,12 +228,13 @@ const createVectorCacheEntry = async (req, res) => {
                 {
                     clean_name: uppercaseName,
                     target_template_id: target_template_id || null,
+                    is_semantic_anchor: is_semantic_anchor || false,
                     embedding: embedding,
                     approval_count: 100, // Pre-approved for manual addition
                     is_verified: true
                 }
             ])
-            .select('cache_id, clean_name, target_template_id, approval_count, is_verified, created_at, updated_at')
+            .select('cache_id, clean_name, target_template_id, is_semantic_anchor, approval_count, is_verified, created_at, updated_at')
             .single();
 
         if (error) throw error;
@@ -247,7 +248,7 @@ const createVectorCacheEntry = async (req, res) => {
 
 const bulkCreateVectorCacheEntries = async (req, res) => {
     try {
-        const { entries } = req.body; // Array of { name, target_template_id }
+        const { entries } = req.body; // Array of { name, target_template_id, is_semantic_anchor }
         if (!entries || !Array.isArray(entries)) return res.status(400).json({ error: 'Entries array is required' });
 
         const results = [];
@@ -262,6 +263,7 @@ const bulkCreateVectorCacheEntries = async (req, res) => {
                 results.push({
                     clean_name: uppercaseName,
                     target_template_id: entry.target_template_id || null,
+                    is_semantic_anchor: entry.is_semantic_anchor || false,
                     embedding,
                     approval_count: 100,
                     is_verified: true

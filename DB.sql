@@ -178,6 +178,7 @@ CREATE TABLE public.global_vector_cache (
   cache_id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
   clean_name text NOT NULL UNIQUE,
   target_template_id bigint,
+  is_semantic_anchor boolean DEFAULT false,
   embedding USER-DEFINED NOT NULL,
   approval_count integer DEFAULT 1,
   is_verified boolean DEFAULT false,

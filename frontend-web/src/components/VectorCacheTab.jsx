@@ -121,6 +121,7 @@ const VectorCacheTab = () => {
                 <div style={styles.tableHeader}>
                     <div style={{ flex: 2 }}>CLEAN NAME</div>
                     <div style={{ flex: 1 }}>TEMPLATE ID</div>
+                    <div style={{ flex: 1 }}>ANCHOR</div>
                     <div style={{ flex: 1 }}>VERIFIED</div>
                     <div style={{ flex: 1 }}>APPROVALS</div>
                     <div style={{ flex: 1 }}>CREATED</div>
@@ -141,6 +142,9 @@ const VectorCacheTab = () => {
                             <div key={row.cache_id} style={styles.tableRow}>
                                 <div style={{ flex: 2, fontWeight: 700, color: '#fff' }}>{row.clean_name}</div>
                                 <div style={{ flex: 1 }}><span style={styles.idBadge}>{row.target_template_id}</span></div>
+                                <div style={{ flex: 1 }}>
+                                    {row.is_semantic_anchor ? <span style={{ color: '#c084fc', fontSize: '10px', fontWeight: 800 }}>YES</span> : <span style={{ color: '#64748b', fontSize: '10px' }}>NO</span>}
+                                </div>
                                 <div style={{ flex: 1 }}>
                                     {row.is_verified ? 
                                         <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', fontWeight: 800 }}><CheckCircle size={12}/> YES</span> : 
@@ -166,7 +170,7 @@ const VectorCacheTab = () => {
 
 const AddVectorModal = ({ onClose, onSuccess }) => {
     const [mode, setMode] = useState('manual');
-    const [formData, setFormData] = useState({ name: '', templateId: '' });
+    const [formData, setFormData] = useState({ name: '', templateId: '', isSemanticAnchor: false });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const fileInputRef = useRef(null);
@@ -180,7 +184,8 @@ const AddVectorModal = ({ onClose, onSuccess }) => {
             const { data: { session } } = await supabase.auth.getSession();
             await axios.post(`${API_BASE_URL}/api/qc/vector-cache`, {
                 clean_name: formData.name.trim().toUpperCase(),
-                target_template_id: formData.templateId ? Number(formData.templateId) : null
+                target_template_id: formData.templateId ? Number(formData.templateId) : null,
+                is_semantic_anchor: formData.isSemanticAnchor
             }, {
                 headers: { Authorization: `Bearer ${session?.access_token}` }
             });
@@ -204,9 +209,12 @@ const AddVectorModal = ({ onClose, onSuccess }) => {
             const entries = [];
             
             lines.forEach((line) => {
-                const [name, template_id] = line.split(',').map(s => s.trim());
+                const parts = line.split(',').map(s => s.trim());
+                const name = parts[0];
+                const template_id = parts[1];
+                const is_anchor = parts[2]?.toLowerCase() === 'true';
                 if (name && name.toLowerCase() !== 'name') {
-                    entries.push({ name, target_template_id: Number(template_id) || null });
+                    entries.push({ name, target_template_id: Number(template_id) || null, is_semantic_anchor: is_anchor });
                 }
             });
 
@@ -265,6 +273,15 @@ const AddVectorModal = ({ onClose, onSuccess }) => {
                                   style={styles.formInput}
                                 />
                             </div>
+                            <div style={{ ...styles.formGroup, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <input 
+                                  type="checkbox" 
+                                  id="isAnchor"
+                                  checked={formData.isSemanticAnchor}
+                                  onChange={e => setFormData({...formData, isSemanticAnchor: e.target.checked})}
+                                />
+                                <label htmlFor="isAnchor" style={{ ...styles.label, marginBottom: 0 }}>Is Semantic Anchor (Skip Fuzzy Stage)</label>
+                            </div>
                             {error && <div style={styles.errorMsg}><AlertCircle size={14}/> {error}</div>}
                             <button type="submit" disabled={loading} style={styles.submitBtn}>
                                 {loading ? <><Loader2 size={16} className="spin" style={{ marginRight: '8px'}}/> Generating...</> : 'Create Vector'}
@@ -275,7 +292,7 @@ const AddVectorModal = ({ onClose, onSuccess }) => {
                             <div style={styles.csvIcon}><FileText size={48} opacity={0.2}/></div>
                             <p style={{ fontSize: '13px', opacity: 0.7, textAlign: 'center' }}>
                                 Upload a CSV file with columns: <br/>
-                                <code style={{ color: '#8b5cf6' }}>name, template_id</code>
+                                <code style={{ color: '#8b5cf6' }}>name, template_id, is_semantic_anchor</code>
                             </p>
                             <input type="file" accept=".csv" ref={fileInputRef} style={{ display: 'none' }} onChange={handleCsvUpload} />
                             <button style={styles.secondaryBtn} onClick={() => fileInputRef.current.click()} disabled={loading}>

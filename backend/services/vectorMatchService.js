@@ -117,11 +117,12 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     // High-priority exact matches from the global cache.
     const { data: globalCache } = await supabase
       .from('global_vector_cache')
-      .select('clean_name, target_template_id')
+      .select('clean_name, target_template_id, is_semantic_anchor')
       .eq('is_verified', true);
 
     if (globalCache) {
       for (const entry of globalCache) {
+        if (entry.is_semantic_anchor) continue;
         const cacheWord = entry.clean_name.toUpperCase();
         
         // A. LITERAL MATCH
@@ -149,6 +150,7 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     // Only runs if no exact or keyword match was found.
     if (globalCache) {
       for (const entry of globalCache) {
+        if (entry.is_semantic_anchor) continue;
         const cacheWord = entry.clean_name.toUpperCase();
         if (cacheWord.length <= 3) continue; // Skip short words to avoid "TAX" -> "TAXI" errors
 
