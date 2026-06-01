@@ -17,7 +17,7 @@ import Profile from './components/pages/Profile';
 import CategoryTransactions from './components/pages/CategoryTransactions';
 import WelcomeScreen from './components/WelcomeScreen';
 import Settings from './components/pages/Settings';
-import SetupAccounts from './components/SetupAccounts';
+import OnboardingCoaReview from './components/OnboardingCoaReview';
 import QCPanel from './components/QCPanel';
 
 // Parser Module Components
@@ -49,12 +49,21 @@ const ModuleGuard = ({ hasModules, hasIdentifiers, checkSetupStatus, user, toggl
       </div>
     );
   }
+  // Step 1 — choose profile & module, insert COA template accounts
   if (hasModules === false) {
-    return <WelcomeScreen onSetupComplete={checkSetupStatus} toggleTheme={toggleTheme} isDarkMode={isDarkMode} />;
+    return (
+      <WelcomeScreen
+        onSetupComplete={checkSetupStatus}
+        toggleTheme={toggleTheme}
+        isDarkMode={isDarkMode}
+      />
+    );
   }
+  // Step 2 — add bank accounts + review/trim spending categories
   if (hasIdentifiers === false) {
-    return <SetupAccounts onSetupAccountsComplete={checkSetupStatus} />;
+    return <OnboardingCoaReview onSetupComplete={checkSetupStatus} />;
   }
+  // Fully set up — enter the app
   return <AppLayout user={user} toggleTheme={toggleTheme} isDarkMode={isDarkMode} />;
 };
 

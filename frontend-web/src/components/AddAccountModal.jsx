@@ -2,8 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { supabase } from '../shared/supabase';
 
-const AddAccountModal = ({ onClose, onCreated }) => {
-  const [form, setForm] = useState({ account_name: '', account_type: 'EXPENSE', parent_account_id: null, balance_nature: 'DEBIT', include_in_llm: true });
+const AddAccountModal = ({ onClose, onCreated, defaultValues = {} }) => {
+  const [form, setForm] = useState({
+    account_name: '',
+    account_type: 'EXPENSE',
+    parent_account_id: null,
+    balance_nature: 'DEBIT',
+    include_in_llm: true,
+    ...defaultValues,           // caller can seed account_type, parent_account_id, etc.
+  });
   const [identifierForm, setIdentifierForm] = useState({ institution_name: '', account_number_last4: '', ifsc_code: '', card_last4: '', card_network: 'VISA', wallet_id: '' });
   const [loading, setLoading] = useState(false);
   const [accounts, setAccounts] = useState([]);
@@ -31,7 +38,7 @@ const AddAccountModal = ({ onClose, onCreated }) => {
   }, []);
 
   const handleReset = () => {
-    setForm({ account_name: '', account_type: 'EXPENSE', parent_account_id: null, balance_nature: 'DEBIT', include_in_llm: true });
+    setForm({ account_name: '', account_type: 'EXPENSE', parent_account_id: null, balance_nature: 'DEBIT', include_in_llm: true, ...defaultValues });
     setIdentifierForm({ institution_name: '', account_number_last4: '', ifsc_code: '', card_last4: '', card_network: 'VISA', wallet_id: '' });
   };
   const handleClose = () => { handleReset(); onClose(); };

@@ -1,0 +1,305 @@
+/* OnboardingCoaReview — full-page layout for the COA review onboarding step */
+
+.coa-review-wrapper {
+  min-height: 100vh;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Outfit', sans-serif;
+  overflow: hidden;
+}
+
+/* ── Page header ─────────────────────────────────────────────────────────── */
+.coa-review-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 16px 32px 16px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--bg-primary);
+  animation: coaFadeDown 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes coaFadeDown {
+  from { opacity: 0; transform: translateY(-10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.coa-review-header-inner {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.coa-review-title {
+  font-size: 24px;
+  font-weight: 800;
+  margin: 0;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, var(--text-primary) 60%, var(--accent-color));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.coa-review-separator {
+  color: var(--glass-border);
+  font-size: 20px;
+  font-weight: 300;
+}
+
+.coa-review-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ── Scrollable account tree area ───────────────────────────────────────── */
+.coa-review-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px 0;
+  animation: coaFadeIn 0.5s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes coaFadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Sticky footer ───────────────────────────────────────────────────────── */
+.coa-review-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 16px 32px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--glass-border);
+  flex-shrink: 0;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.12);
+}
+
+.coa-review-continue-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 32px;
+  border: none;
+  border-radius: 14px;
+  background: var(--primary-action);
+  color: white;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 14px rgba(42, 79, 122, 0.35);
+  letter-spacing: 0.01em;
+}
+
+.coa-review-continue-btn:hover {
+  background: var(--accent-color);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(42, 79, 122, 0.4);
+}
+
+.coa-review-continue-btn:active {
+  transform: translateY(0);
+}
+
+/* Responsive: collapse padding on narrow screens */
+@media (max-width: 768px) {
+  .coa-review-header,
+  .coa-review-content,
+  .coa-review-footer {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  .coa-review-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+    padding-top: 32px;
+  }
+
+  .coa-review-title {
+    font-size: 22px;
+  }
+
+  .coa-review-footer {
+    justify-content: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .coa-review-continue-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .onb-section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .onb-add-btns {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .onb-add-btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* ── Disabled continue button ───────────────────────────────────────────── */
+.coa-review-continue-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Footer inline error ────────────────────────────────────────────────── */
+.coa-review-error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: #F87171;
+  margin-right: auto;
+  animation: coaFadeIn 0.2s ease forwards;
+}
+
+/* ── Onboarding sections ─────────────────────────────────────────────────── */
+.onb-section {
+  margin-bottom: 36px;
+}
+
+.onb-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.onb-section-header--nobtns {
+  margin-bottom: 14px;
+}
+
+.onb-section-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.onb-section-title {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.onb-section-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── Add account buttons ────────────────────────────────────────────────── */
+.onb-add-btns {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.onb-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+}
+
+.onb-add-btn:hover {
+  border-color: var(--accent-color);
+  background: rgba(127, 175, 138, 0.06);
+  transform: translateY(-1px);
+}
+
+.onb-add-btn--card:hover {
+  border-color: var(--primary-action);
+  background: rgba(42, 79, 122, 0.06);
+}
+
+/* ── Linked account chips ───────────────────────────────────────────────── */
+.onb-accounts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.onb-account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 16px;
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  animation: coaFadeIn 0.25s ease forwards;
+}
+
+.onb-account-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.onb-account-label {
+  letter-spacing: 0.01em;
+}
+
+/* ── Empty state prompt ─────────────────────────────────────────────────── */
+.onb-empty-prompt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.06);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  color: #F87171;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.onb-empty-prompt svg {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+

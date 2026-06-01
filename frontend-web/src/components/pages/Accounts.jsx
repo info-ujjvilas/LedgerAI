@@ -186,23 +186,36 @@ const EditIdentifierModal = ({ account, onClose, onSuccess }) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Account Actions Menu (⋯ popover)
 // ─────────────────────────────────────────────────────────────────────────────
+const POPUP_W = 210; // keep in sync with .acct-menu-popup min-width
+
 const AccountActionsMenu = ({ node, onRename, onDeactivate, onEditIdentifier, onToggleLlm }) => {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState({ top: 0, left: 0 });
+  const [tooltipVisible, setTooltipVisible] = useState(false);
+  const [tooltipCoords, setTooltipCoords] = useState({ top: 0, left: 0 });
   const menuRef = React.useRef(null);
   const popupRef = React.useRef(null);
+  const toggleRowRef = React.useRef(null);
 
   const toggleOpen = (e) => {
     e.stopPropagation();
     if (!open && menuRef.current) {
       const rect = menuRef.current.getBoundingClientRect();
-      setCoords({
-        top: rect.bottom + window.scrollY + 6,
-        left: rect.right + window.scrollX - 160
-      });
+      const rawLeft = rect.right + window.scrollX - POPUP_W;
+      const left = Math.max(window.scrollX + 8, Math.min(rawLeft, window.scrollX + window.innerWidth - POPUP_W - 8));
+      setCoords({ top: rect.bottom + window.scrollY + 6, left });
     }
     setOpen(!open);
   };
+
+  const handleToggleRowMouseEnter = () => {
+    if (toggleRowRef.current) {
+      const r = toggleRowRef.current.getBoundingClientRect();
+      setTooltipCoords({ top: r.top, left: r.left + r.width / 2 });
+      setTooltipVisible(true);
+    }
+  };
+  const handleToggleRowMouseLeave = () => setTooltipVisible(false);
 
   useEffect(() => {
     if (!open) return;
@@ -235,7 +248,7 @@ const AccountActionsMenu = ({ node, onRename, onDeactivate, onEditIdentifier, on
       </button>
 
       {open && createPortal(
-        <div className="acct-menu-popup" ref={popupRef} style={{ top: coords.top, left: coords.left, position: 'absolute' }} onClick={e => e.stopPropagation()}>
+        <div className="acct-menu-popup" ref={popupRef} style={{ top: coords.top, left: coords.left, right: 'auto', position: 'absolute' }} onClick={e => e.stopPropagation()}>
           {!node.is_system_generated && (
             <>
               <button className="acct-menu-item" onClick={() => { onRename(); setOpen(false); }}>
@@ -257,12 +270,37 @@ const AccountActionsMenu = ({ node, onRename, onDeactivate, onEditIdentifier, on
             </>
           )}
 
-          <button className="acct-menu-item" onClick={() => { onToggleLlm(); setOpen(false); }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            {node.include_in_llm ? 'Exclude from AI' : 'Include in AI'}
-          </button>
+          <div
+            ref={toggleRowRef}
+            className="acct-menu-item acct-menu-toggle-row"
+            onMouseEnter={handleToggleRowMouseEnter}
+            onMouseLeave={handleToggleRowMouseLeave}
+          >
+            <span className="acct-toggle-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              Include in AI categorisation
+            </span>
+            <label className="acct-toggle-switch" onClick={e => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                checked={!!node.include_in_llm}
+                onChange={() => onToggleLlm()}
+              />
+              <span className="acct-toggle-slider" />
+            </label>
+          </div>
+
+          {tooltipVisible && createPortal(
+            <div
+              className="acct-llm-tooltip"
+              style={{ top: tooltipCoords.top, left: tooltipCoords.left }}
+            >
+              When enabled, AI will suggest this account as a category when you're reviewing transactions
+            </div>,
+            document.body
+          )}
 
           {node.is_system_generated ? (
             <div className="acct-menu-item acct-menu-locked">
