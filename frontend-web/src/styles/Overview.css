@@ -201,9 +201,20 @@
 .chart-bar {
   width: 28px;
   border-radius: 4px 4px 0 0;
+  transition: all 0.2s ease;
 }
-.chart-bar.income { background: #10B981; }
-.chart-bar.expense { background: #EF4444; }
+.chart-bar.income {
+  background: linear-gradient(180deg, #10B981 0%, #059669 100%);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
+}
+.chart-bar.expense {
+  background: linear-gradient(180deg, #F87171 0%, #DC2626 100%);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+}
+.chart-bar:hover {
+  filter: brightness(1.1);
+  transform: scaleY(1.02);
+}
 .chart-label {
   position: absolute;
   bottom: -25px;
@@ -391,11 +402,18 @@
   color: var(--text-primary);
 }
 .stat-card {
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s;
 }
 .stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 12px rgba(0,0,0,0.05);
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.15);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.stat-card:hover .stat-icon {
+  transform: scale(1.1);
+}
+.stat-icon {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .empty-state {
   text-align: center;

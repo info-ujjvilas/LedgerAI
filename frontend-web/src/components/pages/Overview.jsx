@@ -15,8 +15,16 @@ const Overview = () => {
   const [ledgerLoading, setLedgerLoading] = useState(true);
   const loading = txnsLoading || ledgerLoading;
   const [accounts, setAccounts] = useState([]);
-  const [selectedAccountId, setSelectedAccountId] = useState('ALL');
+  const [selectedAccountId, setSelectedAccountId] = useState(() => {
+    return sessionStorage.getItem('ledgerai_selected_account_id') || 'ALL';
+  });
   const [timeframe, setTimeframe] = useState('MONTH');
+  const [timeRange, setTimeRange] = useState('12M'); // 'ALL' | '30D' | '3M' | '12M'
+
+  const handleAccountChange = (val) => {
+    setSelectedAccountId(val);
+    sessionStorage.setItem('ledgerai_selected_account_id', val);
+  };
   const [activeBarIndex, setActiveBarIndex] = useState(null);
   const [activeDonutIndex, setActiveDonutIndex] = useState(null);
   const [breakdownModal, setBreakdownModal] = useState({ isOpen: false, type: null, data: [] });
@@ -73,16 +81,41 @@ const Overview = () => {
     fetchLedger();
   }, []);
 
-  // Derive accounts list from context transactions whenever they change
+  // Fetch linked bank and credit card accounts for the dropdown filter
   useEffect(() => {
-    const accsMap = {};
-    allTxnsRaw.forEach(txn => {
-      if (txn.account_id) {
-        accsMap[txn.account_id] = txn.source_account?.account_name || `Account ${String(txn.account_id).substring(0, 4)}`;
+    const fetchFilterAccounts = async () => {
+      if (!user) return;
+      const { data } = await supabase
+        .from('accounts')
+        .select(`
+          account_id,
+          account_name,
+          account_identifiers!inner (
+            account_number_last4,
+            card_last4,
+            is_active
+          )
+        `)
+        .eq('user_id', user.id)
+        .eq('is_active', true);
+
+      if (data) {
+        const filtered = data.filter(acc =>
+          acc.account_identifiers &&
+          acc.account_identifiers.length > 0 &&
+          acc.account_identifiers.some(ident =>
+            ident.is_active &&
+            (ident.account_number_last4 != null || ident.card_last4 != null)
+          )
+        ).map(acc => ({
+          id: acc.account_id,
+          name: acc.account_name
+        }));
+        setAccounts(filtered);
       }
-    });
-    setAccounts(Object.keys(accsMap).map(id => ({ id, name: accsMap[id] })));
-  }, [allTxnsRaw]);
+    };
+    fetchFilterAccounts();
+  }, [user]);
 
   useEffect(() => {
     if (Object.keys(globalLedgerMap).length === 0) return;
@@ -174,7 +207,20 @@ const Overview = () => {
   };
 
   const { stats, topExpenses, incomeBreakdown, expenseBreakdown, assetsBreakdown, liabilitiesBreakdown, recentTxns, chartData, insights, mappedExpenses, donutColors } = React.useMemo(() => {
-    const txns = selectedAccountId === 'ALL' ? allTxnsRaw : allTxnsRaw.filter(t => String(t.account_id) === String(selectedAccountId));
+    let txns = selectedAccountId === 'ALL' ? allTxnsRaw : allTxnsRaw.filter(t => String(t.account_id) === String(selectedAccountId));
+
+    if (timeRange !== 'ALL') {
+      const today = new Date();
+      const cutoff = new Date();
+      if (timeRange === '30D') {
+        cutoff.setDate(today.getDate() - 30);
+      } else if (timeRange === '3M') {
+        cutoff.setMonth(today.getMonth() - 3);
+      } else if (timeRange === '12M') {
+        cutoff.setMonth(today.getMonth() - 12);
+      }
+      txns = txns.filter(t => new Date(t.txn_date) >= cutoff);
+    }
 
     let totalIncome = 0;
     let totalExpense = 0;
@@ -323,7 +369,11 @@ const Overview = () => {
       const avg = totalExpense / validExpenseTxns.length;
       if (largest.debit > avg * 3 && largest.debit > 10000) {
         const formattedAmt = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(largest.debit);
-        insights.push({ type: 'warning', text: `Large unusual transaction detected: ${formattedAmt} for '${largest.details}'.` });
+        insights.push({
+          type: 'warning',
+          text: `Large unusual transaction detected: ${formattedAmt} for '${largest.details}'.`,
+          txn: largest
+        });
       }
     }
 
@@ -350,7 +400,7 @@ const Overview = () => {
       recentTxns: categorisedTxns.slice(0, 5),
       chartData: sortedMonths
     };
-  }, [allTxnsRaw, selectedAccountId, timeframe]);
+  }, [allTxnsRaw, selectedAccountId, timeframe, timeRange]);
 
   useEffect(() => {
     if (chartScrollRef.current) {
@@ -376,20 +426,17 @@ const Overview = () => {
           <div style={{ width: '1px', height: '24px', background: 'var(--border-color)' }}></div>
           <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>View your financial summary and key metrics.</span>
         </div>
-        <div className="header-filters" style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+        <div className="header-filters" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           {accounts.length > 0 && (
             <select
               value={selectedAccountId}
-              onChange={e => setSelectedAccountId(e.target.value)}
+              onChange={e => handleAccountChange(e.target.value)}
+              className="filter-tab"
               style={{
-                padding: '8px 12px',
-                borderRadius: '8px',
-                background: 'var(--bg-secondary)',
-                color: 'var(--text-primary)',
-                border: '1px solid var(--border-color)',
-                fontSize: '14px',
                 outline: 'none',
-                cursor: 'pointer'
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                color: 'var(--text-primary)'
               }}
             >
               <option value="ALL">All Accounts</option>
@@ -398,7 +445,22 @@ const Overview = () => {
               ))}
             </select>
           )}
-          <div className="time-filter">Last 12 Months</div>
+          <select
+            value={timeRange}
+            onChange={e => setTimeRange(e.target.value)}
+            className="filter-tab"
+            style={{
+              outline: 'none',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              color: 'var(--text-primary)'
+            }}
+          >
+            <option value="ALL">All time</option>
+            <option value="30D">Last 30 Days</option>
+            <option value="3M">Last 3 Months</option>
+            <option value="12M">Last 12 Months</option>
+          </select>
         </div>
       </div>
 
@@ -656,8 +718,26 @@ const Overview = () => {
                   {insight.type === 'warning' && <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>}
                   {insight.type === 'info' && <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>}
                 </div>
-                <div style={{ fontSize: '14px', lineHeight: '1.4', color: 'var(--text-primary)' }}>
-                  {insight.text}
+                <div style={{ fontSize: '14px', lineHeight: '1.4', color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <span>{insight.text}</span>
+                  {insight.txn && (
+                    <button
+                      onClick={() => navigate('/transactions', { state: { srcAccId: insight.txn.account_id } })}
+                      style={{
+                        alignSelf: 'flex-start',
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--primary-action, #7c6ff7)',
+                        fontSize: '12px',
+                        fontWeight: '600',
+                        padding: 0,
+                        cursor: 'pointer',
+                        textDecoration: 'underline'
+                      }}
+                    >
+                      View Transactions
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

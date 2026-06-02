@@ -54,7 +54,19 @@ const Analytics = () => {
   const [plData, setPlData] = useState(null);
   const [balanceData, setBalanceData] = useState(null);
   const [ledgerData, setLedgerData] = useState([]);
-  const [selectedAccountId, setSelectedAccountId] = useState('ALL');
+  const [selectedAccountId, setSelectedAccountId] = useState(() => {
+    return sessionStorage.getItem('ledgerai_selected_account_id') || 'ALL';
+  });
+
+  const [ledgerSearch, setLedgerSearch] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState({});
+  
+  const toggleGroup = (groupName) => {
+    setCollapsedGroups(prev => ({
+      ...prev,
+      [groupName]: !prev[groupName]
+    }));
+  };
   const [bankAccounts, setBankAccounts] = useState([]);
   const [includePending, setIncludePending] = useState(false);
   const [showPLDownload, setShowPLDownload] = useState(false);
@@ -122,13 +134,32 @@ const Analytics = () => {
       if (!user) return;
       const { data } = await supabase
         .from('accounts')
-        .select('account_id, account_name')
+        .select(`
+          account_id,
+          account_name,
+          account_identifiers!inner (
+            account_number_last4,
+            card_last4,
+            is_active
+          )
+        `)
         .eq('user_id', user.id)
-        .in('account_type', ['ASSET', 'LIABILITY']);
-      if (data) setBankAccounts(data);
+        .eq('is_active', true);
+
+      if (data) {
+        const filtered = data.filter(acc =>
+          acc.account_identifiers &&
+          acc.account_identifiers.length > 0 &&
+          acc.account_identifiers.some(ident =>
+            ident.is_active &&
+            (ident.account_number_last4 != null || ident.card_last4 != null)
+          )
+        );
+        setBankAccounts(filtered);
+      }
     };
     fetchAccounts();
-  }, []);
+  }, [user]);
 
   /**
    * Fetch data based on current view and period
@@ -207,6 +238,8 @@ const Analytics = () => {
         const { data, error } = await query;
         if (error) throw error;
 
+        let filteredTxns = data || [];
+
         // Step 3: Initialize groups with all COA accounts so all categories show
         const incomeGroups = {};
         const expenseGroups = {};
@@ -239,7 +272,7 @@ const Analytics = () => {
         });
 
         // Add amounts from actual transactions
-        (data || []).forEach((txn) => {
+        filteredTxns.forEach((txn) => {
           if (!txn.offset_account) return;
           const accountName = txn.offset_account.account_name || '';
           const nameLower = accountName.toLowerCase();
@@ -252,14 +285,7 @@ const Analytics = () => {
           
           if (rootParent.toLowerCase().includes('uncategor') || rootParent.toLowerCase().includes('unclassifi')) return;
 
-          const baseAccount = acctMap[txn.base_account_id];
-          if (baseAccount && baseAccount.account_type === 'ASSET') {
-             if (txn.transaction_type === 'CREDIT') {
-                 type = 'INCOME';
-             } else if (txn.transaction_type === 'DEBIT') {
-                 type = 'EXPENSE';
-             }
-          }
+          if (type !== 'INCOME' && type !== 'EXPENSE') return;
 
           const formattedTxn = {
              uncategorized_transaction_id: txn.transaction_id,
@@ -312,7 +338,9 @@ const Analytics = () => {
 
           const { data: pendingData } = await pendingQuery;
 
-          (pendingData || []).forEach(txn => {
+          let filteredPending = pendingData || [];
+
+          filteredPending.forEach(txn => {
             const credit = parseFloat(txn.credit) || 0;
             const debit = parseFloat(txn.debit) || 0;
             const linkedTxn = txn.transactions && txn.transactions.length > 0 ? txn.transactions[0] : null;
@@ -399,6 +427,9 @@ const Analytics = () => {
               parent_account:parent_account_id (
                 account_name
               )
+            ),
+            transaction:transaction_id (
+              base_account_id
             )
           `)
           .eq('user_id', user.id)
@@ -412,6 +443,8 @@ const Analytics = () => {
 
         console.log('Balance Sheet Query:', { user_id: user.id, range, data, error });
         if (error) throw error;
+
+        let filteredEntries = data || [];
 
         // Compute balances from ledger entries
         const accountMap = {};
@@ -432,7 +465,7 @@ const Analytics = () => {
           }
         });
 
-        (data || []).forEach(entry => {
+        filteredEntries.forEach(entry => {
           if (!entry.account) return;
           const { account_id, account_type } = entry.account;
           if (!['ASSET', 'LIABILITY', 'EQUITY'].includes(account_type)) return;
@@ -518,7 +551,8 @@ const Analytics = () => {
             ),
             transaction:transaction_id (
               details,
-              transaction_id
+              transaction_id,
+              base_account_id
             )
           `)
           .eq('user_id', user.id)
@@ -530,7 +564,9 @@ const Analytics = () => {
         console.log('Ledger Query:', { user_id: user.id, range, data, error });
         if (error) throw error;
 
-        setLedgerData(data || []);
+        let filteredLedger = data || [];
+
+        setLedgerData(filteredLedger);
       };
 
       await Promise.all([fetchPL(), fetchBalance(), fetchLedger()]);
@@ -661,7 +697,7 @@ const Analytics = () => {
       doc.setFontSize(10);
       doc.setTextColor(100);
       doc.text(meta, 14, 30);
-      doc.text("Basis: Accrual", 14, 35);
+      doc.text(meta, 14, 30);
 
       const tableRows = [];
       
@@ -733,17 +769,44 @@ const Analytics = () => {
           {/* Dynamic Income Sections */}
           {incomeGroups.map((group, gIdx) => (
             <React.Fragment key={`inc-group-${gIdx}`}>
-              <div className="pl-section-heading">{group.groupName}</div>
-              {group.items.map((item, idx) => (
-                <div key={`inc-item-${gIdx}-${idx}`} className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default' }}>
-                  <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
-                  <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
-                </div>
-              ))}
-              <div className="pl-row pl-row-subtotal">
-                <div className="pl-col-account"><strong>Total for {group.groupName}</strong></div>
-                <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+              <div 
+                className="pl-section-heading" 
+                onClick={() => toggleGroup(group.groupName)}
+                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', userSelect: 'none' }}
+              >
+                <span>{collapsedGroups[group.groupName] ? '▶' : '▼'}</span>
+                <span>{group.groupName}</span>
               </div>
+              {!collapsedGroups[group.groupName] && (
+                <>
+                  {group.items.map((item, idx) => (
+                    <div key={`inc-item-${gIdx}-${idx}`} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--glass-border, var(--border-color))' }}>
+                      <div className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default', borderBottom: 'none' }}>
+                        <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
+                        <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
+                      </div>
+                      {/* Inline Percentage Weight Bar */}
+                      <div style={{ padding: '0 24px 8px 56px', marginTop: '-4px' }}>
+                        <div style={{ width: '100%', height: '4px', background: 'var(--border-color)', borderRadius: '2px', overflow: 'hidden', opacity: 0.6 }}>
+                          <div style={{
+                            width: `${Math.min(100, Math.max(0, group.total > 0 ? (item.amount / group.total) * 100 : 0))}%`,
+                            height: '100%',
+                            background: 'linear-gradient(90deg, #10B981 0%, #059669 100%)',
+                            borderRadius: '2px'
+                          }} />
+                        </div>
+                        <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px', fontWeight: '500' }}>
+                          {((group.total > 0 ? (item.amount / group.total) : 0) * 100).toFixed(1)}% of parent total
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="pl-row pl-row-subtotal">
+                    <div className="pl-col-account"><strong>Total for {group.groupName}</strong></div>
+                    <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+                  </div>
+                </>
+              )}
             </React.Fragment>
           ))}
 
@@ -765,24 +828,51 @@ const Analytics = () => {
           {/* Conditionally Render COGS and Gross Profit */}
           {hasCogs && (
             <>
-              <div className="pl-section-heading">Cost of Goods Sold</div>
-              {cogsItems.length === 0 ? (
-                <div className="pl-row pl-row-empty">
-                  <div className="pl-col-account pl-indent pl-text-muted">—</div>
-                  <div className="pl-col-total pl-text-muted">—</div>
-                </div>
-              ) : (
-                cogsItems.map((item, idx) => (
-                  <div key={`cogs-${idx}`} className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default' }}>
-                    <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
-                    <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
-                  </div>
-                ))
-              )}
-              <div className="pl-row pl-row-subtotal">
-                <div className="pl-col-account"><strong>Total for Cost of Goods Sold</strong></div>
-                <div className="pl-col-total"><strong>{formatPLAmount(totalCogs)}</strong></div>
+              <div 
+                className="pl-section-heading"
+                onClick={() => toggleGroup("Cost of Goods Sold")}
+                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', userSelect: 'none' }}
+              >
+                <span>{collapsedGroups["Cost of Goods Sold"] ? '▶' : '▼'}</span>
+                <span>Cost of Goods Sold</span>
               </div>
+              {!collapsedGroups["Cost of Goods Sold"] && (
+                <>
+                  {cogsItems.length === 0 ? (
+                    <div className="pl-row pl-row-empty">
+                      <div className="pl-col-account pl-indent pl-text-muted">—</div>
+                      <div className="pl-col-total pl-text-muted">—</div>
+                    </div>
+                  ) : (
+                    cogsItems.map((item, idx) => (
+                      <div key={`cogs-${idx}`} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--glass-border, var(--border-color))' }}>
+                        <div className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default', borderBottom: 'none' }}>
+                          <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
+                          <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
+                        </div>
+                        {/* Inline Percentage Weight Bar */}
+                        <div style={{ padding: '0 24px 8px 56px', marginTop: '-4px' }}>
+                          <div style={{ width: '100%', height: '4px', background: 'var(--border-color)', borderRadius: '2px', overflow: 'hidden', opacity: 0.6 }}>
+                            <div style={{
+                              width: `${Math.min(100, Math.max(0, totalCogs > 0 ? (item.amount / totalCogs) * 100 : 0))}%`,
+                              height: '100%',
+                              background: 'linear-gradient(90deg, #F59E0B 0%, #D97706 100%)',
+                              borderRadius: '2px'
+                            }} />
+                          </div>
+                          <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px', fontWeight: '500' }}>
+                            {((totalCogs > 0 ? (item.amount / totalCogs) : 0) * 100).toFixed(1)}% of COGS total
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  <div className="pl-row pl-row-subtotal">
+                    <div className="pl-col-account"><strong>Total for Cost of Goods Sold</strong></div>
+                    <div className="pl-col-total"><strong>{formatPLAmount(totalCogs)}</strong></div>
+                  </div>
+                </>
+              )}
 
               {/* Gross Profit */}
               <div className="pl-row pl-row-highlight" style={{ backgroundColor: 'var(--bg-card)', borderBottom: '2px solid var(--border-color)', borderTop: 'none' }}>
@@ -795,17 +885,44 @@ const Analytics = () => {
           {/* Dynamic Expense Sections */}
           {expenseGroups.map((group, gIdx) => (
              <React.Fragment key={`exp-group-${gIdx}`}>
-               <div className="pl-section-heading">{group.groupName}</div>
-               {group.items.map((item, idx) => (
-                 <div key={`exp-item-${gIdx}-${idx}`} className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default' }}>
-                   <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
-                   <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
-                 </div>
-               ))}
-               <div className="pl-row pl-row-subtotal">
-                 <div className="pl-col-account"><strong>Total for {group.groupName}</strong></div>
-                 <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+               <div 
+                 className="pl-section-heading"
+                 onClick={() => toggleGroup(group.groupName)}
+                 style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', userSelect: 'none' }}
+               >
+                 <span>{collapsedGroups[group.groupName] ? '▶' : '▼'}</span>
+                 <span>{group.groupName}</span>
                </div>
+               {!collapsedGroups[group.groupName] && (
+                 <>
+                   {group.items.map((item, idx) => (
+                     <div key={`exp-item-${gIdx}-${idx}`} style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--glass-border, var(--border-color))' }}>
+                       <div className="pl-row" onClick={() => handleItemClick(item)} style={{ cursor: item.amount !== 0 && item.txns?.length > 0 ? 'pointer' : 'default', borderBottom: 'none' }}>
+                         <div className="pl-col-account pl-indent" style={item.amount !== 0 && item.txns?.length > 0 ? { color: 'var(--primary-action)', textDecoration: 'underline' } : {}}>{item.name}</div>
+                         <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
+                       </div>
+                       {/* Inline Percentage Weight Bar */}
+                       <div style={{ padding: '0 24px 8px 56px', marginTop: '-4px' }}>
+                         <div style={{ width: '100%', height: '4px', background: 'var(--border-color)', borderRadius: '2px', overflow: 'hidden', opacity: 0.6 }}>
+                           <div style={{
+                             width: `${Math.min(100, Math.max(0, group.total > 0 ? (item.amount / group.total) * 100 : 0))}%`,
+                             height: '100%',
+                             background: 'linear-gradient(90deg, #F87171 0%, #DC2626 100%)',
+                             borderRadius: '2px'
+                           }} />
+                         </div>
+                         <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px', fontWeight: '500' }}>
+                           {((group.total > 0 ? (item.amount / group.total) : 0) * 100).toFixed(1)}% of parent total
+                         </div>
+                       </div>
+                     </div>
+                   ))}
+                   <div className="pl-row pl-row-subtotal">
+                     <div className="pl-col-account"><strong>Total for {group.groupName}</strong></div>
+                     <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+                   </div>
+                 </>
+               )}
              </React.Fragment>
           ))}
 
@@ -925,7 +1042,6 @@ const Analytics = () => {
       doc.setFontSize(10);
       doc.setTextColor(100);
       doc.text(meta, 14, 30);
-      doc.text("Basis: Accrual", 14, 35);
 
       const tableRows = [];
       
@@ -983,17 +1099,28 @@ const Analytics = () => {
           
           {assetsGroups.map((group, gIdx) => (
              <React.Fragment key={`ast-grp-${gIdx}`}>
-               <div className="pl-section-heading" style={{ paddingLeft: '24px', background:'transparent', borderTop: 'none', borderBottom: 'none' }}>{group.groupName}</div>
-               {group.items.map((item, idx) => (
-                 <div key={`ast-item-${gIdx}-${idx}`} className="pl-row">
-                   <div className="pl-col-account pl-indent" style={{ paddingLeft: '48px' }}>{item.name}</div>
-                   <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
-                 </div>
-               ))}
-               <div className="pl-row pl-row-subtotal">
-                 <div className="pl-col-account" style={{ paddingLeft: '24px' }}><strong>Total for {group.groupName}</strong></div>
-                 <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+               <div 
+                 className="pl-section-heading" 
+                 onClick={() => toggleGroup(group.groupName)}
+                 style={{ paddingLeft: '24px', background:'transparent', borderTop: 'none', borderBottom: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', userSelect: 'none' }}
+               >
+                 <span>{collapsedGroups[group.groupName] ? '▶' : '▼'}</span>
+                 <span>{group.groupName}</span>
                </div>
+               {!collapsedGroups[group.groupName] && (
+                 <>
+                   {group.items.map((item, idx) => (
+                     <div key={`ast-item-${gIdx}-${idx}`} className="pl-row">
+                       <div className="pl-col-account pl-indent" style={{ paddingLeft: '48px' }}>{item.name}</div>
+                       <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
+                     </div>
+                   ))}
+                   <div className="pl-row pl-row-subtotal">
+                     <div className="pl-col-account" style={{ paddingLeft: '24px' }}><strong>Total for {group.groupName}</strong></div>
+                     <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+                   </div>
+                 </>
+               )}
              </React.Fragment>
           ))}
           
@@ -1006,17 +1133,28 @@ const Analytics = () => {
           
           {liabilitiesEquitiesGroups.map((group, gIdx) => (
              <React.Fragment key={`leq-grp-${gIdx}`}>
-               <div className="pl-section-heading" style={{ paddingLeft: '24px', background:'transparent', borderTop: 'none', borderBottom: 'none' }}>{group.groupName}</div>
-               {group.items.map((item, idx) => (
-                 <div key={`leq-item-${gIdx}-${idx}`} className="pl-row">
-                   <div className="pl-col-account pl-indent" style={{ paddingLeft: '48px' }}>{item.name}</div>
-                   <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
-                 </div>
-               ))}
-               <div className="pl-row pl-row-subtotal">
-                 <div className="pl-col-account" style={{ paddingLeft: '24px' }}><strong>Total for {group.groupName}</strong></div>
-                 <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+               <div 
+                 className="pl-section-heading" 
+                 onClick={() => toggleGroup(group.groupName)}
+                 style={{ paddingLeft: '24px', background:'transparent', borderTop: 'none', borderBottom: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', userSelect: 'none' }}
+               >
+                 <span>{collapsedGroups[group.groupName] ? '▶' : '▼'}</span>
+                 <span>{group.groupName}</span>
                </div>
+               {!collapsedGroups[group.groupName] && (
+                 <>
+                   {group.items.map((item, idx) => (
+                     <div key={`leq-item-${gIdx}-${idx}`} className="pl-row">
+                       <div className="pl-col-account pl-indent" style={{ paddingLeft: '48px' }}>{item.name}</div>
+                       <div className="pl-col-total">{formatPLAmount(item.amount)}</div>
+                     </div>
+                   ))}
+                   <div className="pl-row pl-row-subtotal">
+                     <div className="pl-col-account" style={{ paddingLeft: '24px' }}><strong>Total for {group.groupName}</strong></div>
+                     <div className="pl-col-total"><strong>{formatPLAmount(group.total)}</strong></div>
+                   </div>
+                 </>
+               )}
              </React.Fragment>
           ))}
           
@@ -1138,8 +1276,59 @@ const Analytics = () => {
       doc.save(`Journal_Entries_${new Date().toISOString().split('T')[0]}.pdf`);
     };
 
+    // Filter groups client-side by description or account name
+    const filteredGroups = groups.filter(group => {
+      if (!ledgerSearch.trim()) return true;
+      const searchLower = ledgerSearch.toLowerCase();
+      return group.some(entry => {
+        const accountName = (entry.account?.account_name || '').toLowerCase();
+        const details = (entry.transaction?.details || '').toLowerCase();
+        return accountName.includes(searchLower) || details.includes(searchLower);
+      });
+    });
+
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        {/* Search Input */}
+        <div style={{ position: 'relative', marginBottom: '8px' }}>
+          <input
+            type="text"
+            placeholder="Search entries by description or account name..."
+            value={ledgerSearch}
+            onChange={e => setLedgerSearch(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '10px 16px 10px 40px',
+              borderRadius: '8px',
+              border: '1px solid var(--border-color)',
+              background: 'var(--bg-secondary)',
+              color: 'var(--text-primary)',
+              fontSize: '14px',
+              outline: 'none',
+              boxSizing: 'border-box'
+            }}
+          />
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            style={{
+              position: 'absolute',
+              left: '14px',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              color: 'var(--text-secondary)',
+              opacity: 0.7
+            }}
+          >
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+        </div>
+
         {/* Header */}
         <div style={{
           display: 'grid', gridTemplateColumns: '110px 1fr 160px 120px 120px',
@@ -1155,93 +1344,102 @@ const Analytics = () => {
           <div style={{ textAlign: 'right' }}>Credit</div>
         </div>
 
-        {groups.map((group, gIdx) => {
-          const firstEntry = group[0];
-          const txnDate = formatDate(firstEntry.entry_date);
-          const txnDesc = firstEntry.transaction?.details || '—';
-          const isEven = gIdx % 2 === 0;
-
-          return (
-            <div key={gIdx} style={{
-              borderRadius: '10px',
-              border: '1px solid var(--border-color)',
-              background: isEven ? 'var(--bg-card)' : 'var(--bg-secondary)',
-              overflow: 'hidden',
-              borderLeft: `3px solid ${firstEntry.debit_amount > 0 ? '#ef4444' : '#10b981'}`
-            }}>
-              {group.map((entry, eIdx) => {
-                const isDebit  = entry.debit_amount  > 0;
-                const isCredit = entry.credit_amount > 0;
-                const accType  = entry.account?.account_type;
-                const badge    = acctTypeColor(accType);
-
-                return (
-                  <div key={entry.journal_entry_id} style={{
-                    display: 'grid',
-                    gridTemplateColumns: '110px 1fr 160px 120px 120px',
-                    padding: '11px 16px',
-                    alignItems: 'center',
-                    borderTop: eIdx > 0 ? '1px dashed var(--border-color)' : 'none',
-                    fontSize: '13px',
-                  }}>
-                    {/* Date — only first row shows it */}
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
-                      {eIdx === 0 ? txnDate : ''}
-                    </div>
-
-                    {/* Description — only first row shows it */}
-                    <div style={{
-                      fontWeight: eIdx === 0 ? '500' : '400',
-                      color: eIdx === 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      fontSize: '13px', paddingRight: '8px',
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
-                    }}>
-                      {eIdx === 0 ? txnDesc : (
-                        <span style={{ fontSize: '11px', fontStyle: 'italic', color: 'var(--text-secondary)' }}>
-                          offset entry
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Account name + type badge */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <span style={{ fontSize: '12px', color: 'var(--text-primary)' }}>
-                        {entry.account?.account_name || '—'}
-                      </span>
-                      {accType && (
-                        <span style={{
-                          fontSize: '9px', fontWeight: '700', letterSpacing: '0.05em',
-                          padding: '1px 5px', borderRadius: '4px',
-                          background: badge.bg, color: badge.color
-                        }}>
-                          {accType}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Debit */}
-                    <div style={{
-                      textAlign: 'right', fontWeight: '600',
-                      color: isDebit ? '#ef4444' : 'var(--text-secondary)',
-                      fontSize: isDebit ? '13px' : '12px'
-                    }}>
-                      {isDebit ? formatCurrency(entry.debit_amount) : '—'}
-                    </div>
-
-                    {/* Credit */}
-                    <div style={{
-                      textAlign: 'right', fontWeight: '600',
-                      color: isCredit ? '#10b981' : 'var(--text-secondary)',
-                      fontSize: isCredit ? '13px' : '12px'
-                    }}>
-                      {isCredit ? formatCurrency(entry.credit_amount) : '—'}
-                    </div>
-                  </div>
-                );
-              })}
+        {filteredGroups.length === 0 ? (
+          <div className="placeholder-rows" style={{ justifyContent: 'center', padding: '40px 0' }}>
+            <div className="empty-state">
+              <div className="empty-icon">🔍</div>
+              <p>No matching entries found</p>
             </div>
-          );
-        })}
+          </div>
+        ) : (
+          filteredGroups.map((group, gIdx) => {
+            const firstEntry = group[0];
+            const txnDate = formatDate(firstEntry.entry_date);
+            const txnDesc = firstEntry.transaction?.details || '—';
+            const isEven = gIdx % 2 === 0;
+
+            return (
+              <div key={gIdx} style={{
+                borderRadius: '10px',
+                border: '1px solid var(--border-color)',
+                background: isEven ? 'var(--bg-card)' : 'var(--bg-secondary)',
+                overflow: 'hidden',
+                borderLeft: `3px solid ${firstEntry.debit_amount > 0 ? '#ef4444' : '#10b981'}`
+              }}>
+                {group.map((entry, eIdx) => {
+                  const isDebit  = entry.debit_amount  > 0;
+                  const isCredit = entry.credit_amount > 0;
+                  const accType  = entry.account?.account_type;
+                  const badge    = acctTypeColor(accType);
+
+                  return (
+                    <div key={entry.journal_entry_id} style={{
+                      display: 'grid',
+                      gridTemplateColumns: '110px 1fr 160px 120px 120px',
+                      padding: '11px 16px',
+                      alignItems: 'center',
+                      borderTop: eIdx > 0 ? '1px dashed var(--border-color)' : 'none',
+                      fontSize: '13px',
+                    }}>
+                      {/* Date — only first row shows it */}
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+                        {eIdx === 0 ? txnDate : ''}
+                      </div>
+
+                      {/* Description — only first row shows it */}
+                      <div style={{
+                        fontWeight: eIdx === 0 ? '500' : '400',
+                        color: eIdx === 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        fontSize: '13px', paddingRight: '8px',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+                      }}>
+                        {eIdx === 0 ? txnDesc : (
+                          <span style={{ fontSize: '11px', fontStyle: 'italic', color: 'var(--text-secondary)' }}>
+                            offset entry
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Account name + type badge */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span style={{ fontSize: '12px', color: 'var(--text-primary)' }}>
+                          {entry.account?.account_name || '—'}
+                        </span>
+                        {accType && (
+                          <span style={{
+                            fontSize: '9px', fontWeight: '700', letterSpacing: '0.05em',
+                            padding: '1px 5px', borderRadius: '4px',
+                            background: badge.bg, color: badge.color
+                          }}>
+                            {accType}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Debit */}
+                      <div style={{
+                        textAlign: 'right', fontWeight: '600',
+                        color: isDebit ? '#ef4444' : 'var(--text-secondary)',
+                        fontSize: isDebit ? '13px' : '12px'
+                      }}>
+                        {isDebit ? formatCurrency(entry.debit_amount) : '—'}
+                      </div>
+
+                      {/* Credit */}
+                      <div style={{
+                        textAlign: 'right', fontWeight: '600',
+                        color: isCredit ? '#10b981' : 'var(--text-secondary)',
+                        fontSize: isCredit ? '13px' : '12px'
+                      }}>
+                        {isCredit ? formatCurrency(entry.credit_amount) : '—'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })
+        )}
       </div>
     );
   };
@@ -1266,7 +1464,7 @@ const Analytics = () => {
           </div>
         </div>
         <div className="analytics-metadata">
-          <span>Basis: Accrual</span>
+
           <span>
             {(dateRange.start || dateRange.end)
               ? `${dateRange.start ? formatDate(dateRange.start) : 'Start'} - ${dateRange.end ? formatDate(dateRange.end) : 'End'}`
@@ -1296,7 +1494,7 @@ const Analytics = () => {
           </div>
         </div>
         <div className="analytics-metadata">
-          <span>Basis: Accrual</span>
+
           <span>
             {(dateRange.start || dateRange.end)
               ? `As of ${dateRange.end ? formatDate(dateRange.end) : formatDate(new Date())}`
@@ -1317,7 +1515,9 @@ const Analytics = () => {
           <button className={`segmented-tab ${view === 'ledger' ? 'active' : ''}`} onClick={() => setView('ledger')}>Journal entries</button>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+
+
           {view === 'pl' && (
             <label style={{ display: 'flex', alignItems: 'center', gap: '7px', cursor: 'pointer', userSelect: 'none', fontSize: '13px', color: 'var(--text-secondary)' }}>
               <div
@@ -1338,6 +1538,29 @@ const Analytics = () => {
               </div>
               Include pending
             </label>
+          )}
+
+          {view !== 'ledger' && bankAccounts.length > 0 && (
+            <select
+              value={selectedAccountId}
+              onChange={e => {
+                const val = e.target.value;
+                setSelectedAccountId(val);
+                sessionStorage.setItem('ledgerai_selected_account_id', val);
+              }}
+              className="filter-tab"
+              style={{
+                outline: 'none',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                color: 'var(--text-primary)'
+              }}
+            >
+              <option value="ALL">All accounts</option>
+              {bankAccounts.map(acc => (
+                <option key={acc.account_id} value={acc.account_id}>{acc.account_name}</option>
+              ))}
+            </select>
           )}
 
           {/* Date Picker Button */}
@@ -1444,31 +1667,6 @@ const Analytics = () => {
             <div className="analytics-sidebar">
               {view === 'pl' && renderPLSidebar()}
               {view === 'balance' && renderBalanceSidebar()}
-              
-              <div className="analytics-filter-container">
-                {bankAccounts.length > 0 && (
-                  <select
-                    value={selectedAccountId}
-                    onChange={e => setSelectedAccountId(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--glass-border)',
-                      background: 'transparent',
-                      color: 'var(--text-secondary)',
-                      fontSize: '13px',
-                      outline: 'none',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <option value="ALL">All accounts</option>
-                    {bankAccounts.map(acc => (
-                      <option key={acc.account_id} value={acc.account_id}>{acc.account_name}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
             </div>
           )}
           
