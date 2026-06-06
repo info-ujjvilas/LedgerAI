@@ -40,7 +40,15 @@ export function useAuth() {
 
     // 2. Listen for login/logout events
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
-      setUser(session?.user ?? null);
+      if (event === 'TOKEN_REFRESHED') {
+        setUser(session?.user ?? null);
+      } else if (event === 'SIGNED_OUT' || event === 'TOKEN_REFRESH_FAILED') {
+        // Clear any stale tokens and force re-login
+        supabase.auth.signOut().catch(() => {});
+        setUser(null);
+      } else {
+        setUser(session?.user ?? null);
+      }
       setLoading(false);
     });
 

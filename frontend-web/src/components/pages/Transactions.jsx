@@ -193,7 +193,7 @@ const Transactions = () => {
   const location = useLocation();  // read nav state BEFORE lazy useState inits below
   const user = useUser();
   const { transactions, setTransactions, transactionsLoading: loading,
-          refreshTransactions, accounts: contextAccounts,
+          refreshTransactions, accounts: contextAccounts, refreshAccounts,
           hasMoreTransactions, loadMoreTransactions } = useData();
   const [isMoreLoading, setIsMoreLoading] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -664,7 +664,7 @@ const Transactions = () => {
   const activeFilterCount = selectedAccountIds.size + selectedDocIds.size + selectedOffsetAccountIds.size + (txnTypeFilter !== 'ALL' ? 1 : 0);
 
   const handleAccountCreated = (newAccount) => {
-    setCachedAccounts(prev => [...prev, newAccount]);
+    refreshAccounts();
   };
 
   // ── Shared helper: patch one row in local state by uncategorized_transaction_id ──
