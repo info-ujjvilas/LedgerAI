@@ -1,12 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 
-const LOG_DIR = path.join(__dirname, '../logs');
+// In serverless environments (Vercel) the app directory is read-only.
+// Only attempt file logging when running locally.
+const IS_SERVERLESS = process.env.NODE_ENV === 'production' || process.env.VERCEL;
+
+const LOG_DIR = IS_SERVERLESS ? '/tmp/logs' : path.join(__dirname, '../logs');
 const LOG_FILE = path.join(LOG_DIR, `app-${new Date().toISOString().split('T')[0]}.log`);
 const ERROR_LOG_FILE = path.join(LOG_DIR, `error-${new Date().toISOString().split('T')[0]}.log`);
 
-// Create logs directory if it doesn't exist
-if (!fs.existsSync(LOG_DIR)) {
+if (!IS_SERVERLESS && !fs.existsSync(LOG_DIR)) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 }
 
@@ -26,6 +29,7 @@ function formatLog(level, message, meta = {}) {
 }
 
 function writeToFile(filePath, content) {
+  if (IS_SERVERLESS) return;
   try {
     fs.appendFileSync(filePath, content, 'utf8');
   } catch (err) {
