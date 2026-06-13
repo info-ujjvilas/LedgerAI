@@ -108,12 +108,21 @@ app.use((err, req, res, next) => {
       : err.message
   });
 });
-// Load rules at startup
-rulesEngineService.loadRules().then(() => {
-  app.listen(PORT, () => {
-    logger.info(`LedgerAI Backend running on port ${PORT}`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+// Vercel serverless: export app; load rules eagerly but don't listen
+// Local dev: listen after rules are loaded
+if (require.main === module) {
+  rulesEngineService.loadRules().then(() => {
+    app.listen(PORT, () => {
+      logger.info(`LedgerAI Backend running on port ${PORT}`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+    });
+  }).catch((err) => {
+    logger.error('Failed to load rules at startup', { error: err.message, stack: err.stack });
+    process.exit(1);
   });
-}).catch((err) => {
-  logger.error('Failed to load rules at startup', { error: err.message, stack: err.stack });
-  process.exit(1);
-});
+} else {
+  rulesEngineService.loadRules().catch((err) => {
+    logger.error('Failed to load rules', { error: err.message });
+  });
+}
+
+module.exports = app;
