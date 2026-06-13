@@ -39,7 +39,6 @@ origins = [
     "http://localhost:5174",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
-    "https://ledger-ai-j5ii.vercel.app"
 ]
 
 # Support for dynamic Vercel previews and other origins via environment variable
@@ -50,7 +49,7 @@ if extra_origins:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"https://ledger-ai-.*\.vercel\.app",  # Matches previews
+    allow_origin_regex=r"https://frontend-web-.*\.vercel\.app",  # Matches your Vercel previews only
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
